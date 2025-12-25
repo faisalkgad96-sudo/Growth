@@ -89,6 +89,68 @@ def line_chart(df, title="", y_label=""):
 # ----------------------------------------------------
 # DATA LOAD
 # ----------------------------------------------------
+import pickle
+import os
+from pathlib import Path
+
+# Create data directory for persistence
+DATA_DIR = Path("persistent_data")
+DATA_DIR.mkdir(exist_ok=True)
+
+DIST_POINTS_FILE = DATA_DIR / "distribution_points.pkl"
+ANALYZED_DATA_FILE = DATA_DIR / "analyzed_data.pkl"
+
+# Load saved data on startup
+def load_persistent_data():
+    """Load distribution points and analyzed data from disk"""
+    # Load distribution points
+    if DIST_POINTS_FILE.exists():
+        try:
+            with open(DIST_POINTS_FILE, 'rb') as f:
+                saved_points = pickle.load(f)
+                st.session_state.distribution_points = saved_points['points']
+                st.session_state.points_updated = saved_points.get('updated')
+        except Exception as e:
+            st.warning(f"Could not load saved distribution points: {e}")
+    
+    # Load analyzed data
+    if ANALYZED_DATA_FILE.exists():
+        try:
+            with open(ANALYZED_DATA_FILE, 'rb') as f:
+                saved_data = pickle.load(f)
+                st.session_state.sessions = saved_data['sessions']
+                st.session_state.heat = saved_data['heat']
+                st.session_state.rides = saved_data['rides']
+                st.session_state.data_updated = saved_data.get('updated')
+                st.session_state.data_loaded = True
+        except Exception as e:
+            st.warning(f"Could not load saved data: {e}")
+
+def save_distribution_points():
+    """Save distribution points to disk"""
+    try:
+        with open(DIST_POINTS_FILE, 'wb') as f:
+            pickle.dump({
+                'points': st.session_state.distribution_points,
+                'updated': st.session_state.points_updated
+            }, f)
+    except Exception as e:
+        st.error(f"Could not save distribution points: {e}")
+
+def save_analyzed_data():
+    """Save analyzed data to disk"""
+    try:
+        with open(ANALYZED_DATA_FILE, 'wb') as f:
+            pickle.dump({
+                'sessions': st.session_state.sessions,
+                'heat': st.session_state.heat,
+                'rides': st.session_state.rides,
+                'updated': st.session_state.data_updated
+            }, f)
+    except Exception as e:
+        st.error(f"Could not save analyzed data: {e}")
+
+# Initialize session state
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
 if "distribution_points" not in st.session_state:
@@ -99,6 +161,9 @@ if "data_updated" not in st.session_state:
     st.session_state.data_updated = None
 if "rides" not in st.session_state:
     st.session_state.rides = pd.DataFrame()
+if "initialized" not in st.session_state:
+    st.session_state.initialized = False
+    load_persistent_data()  # Load saved data on first run
 
 with st.sidebar:
     st.header("📂 Upload Data")
@@ -115,6 +180,8 @@ with st.sidebar:
         if st.button("Clear Points"):
             st.session_state.distribution_points = []
             st.session_state.points_updated = None
+            if DIST_POINTS_FILE.exists():
+                DIST_POINTS_FILE.unlink()  # Delete saved file
             st.rerun()
     
     with st.expander("➕ Add Points", expanded=len(st.session_state.distribution_points) == 0):
@@ -128,6 +195,7 @@ with st.sidebar:
                     points_df['area'] = area_name
                     st.session_state.distribution_points.append({'area': area_name, 'data': points_df})
                     st.session_state.points_updated = pd.Timestamp.now()
+                    save_distribution_points()  # Save to disk
                     st.success(f"✅ Added {len(points_df)} points for {area_name}")
                     st.rerun()
                 except Exception as e:
@@ -153,6 +221,8 @@ with st.sidebar:
             if st.button("Clear Data", use_container_width=True):
                 st.session_state.data_loaded = False
                 st.session_state.data_updated = None
+                if ANALYZED_DATA_FILE.exists():
+                    ANALYZED_DATA_FILE.unlink()  # Delete saved file
                 st.rerun()
     
     # Upload section - only show if no data loaded
@@ -233,6 +303,7 @@ with st.sidebar:
                     st.session_state.rides = rides
                     st.session_state.data_loaded = True
                     st.session_state.data_updated = pd.Timestamp.now()
+                    save_analyzed_data()  # Save to disk for persistence
                     
                     st.success("✅ Analysis complete!")
                     st.rerun()
