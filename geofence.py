@@ -241,60 +241,22 @@ with st.sidebar:
     # Upload section - only show if no data loaded
     if not st.session_state.data_loaded:
         st.markdown("**Upload Files:**")
-        st.caption("💡 You can upload multiple files for each type - they will be combined automatically")
         
-        sfiles = st.file_uploader("Sessions", type=["csv", "xlsx"], key="sessions_upload", accept_multiple_files=True)
-        hfiles = st.file_uploader("Heat Data", type=["csv", "xlsx"], key="heat_upload", accept_multiple_files=True)
-        rfiles = st.file_uploader("Rides Data", type=["csv", "xlsx"], key="rides_upload", accept_multiple_files=True)
+        sfile = st.file_uploader("Sessions", type=["csv", "xlsx"], key="sessions_upload")
+        hfile = st.file_uploader("Heat Data", type=["csv", "xlsx"], key="heat_upload")
+        rfile = st.file_uploader("Rides Data", type=["csv", "xlsx"], key="rides_upload")
 
         if st.button("🚀 Analyze", type="primary", use_container_width=True):
-            if not (sfiles and hfiles and rfiles):
-                st.error("Upload at least one file for each type")
+            if not (sfile and hfile and rfile):
+                st.error("Upload all three files")
             elif not st.session_state.distribution_points:
                 st.error("Add distribution points first")
             else:
                 with st.spinner("Processing..."):
-                    # Load and combine sessions files
-                    sessions_list = []
-                    for i, sfile in enumerate(sfiles, 1):
-                        df = pd.read_csv(sfile) if sfile.name.endswith(".csv") else pd.read_excel(sfile)
-                        sessions_list.append(df)
-                        st.toast(f"📄 Sessions file {i}/{len(sfiles)}: {sfile.name} - {len(df):,} rows")
-                    sessions = pd.concat(sessions_list, ignore_index=True)
-                    st.toast(f"✅ Combined {len(sfiles)} sessions file(s) - {len(sessions):,} total rows")
-                    
-                    # Remove any existing assignment columns to force re-assignment
-                    for col in ['Assigned_Area', 'Assigned_Neighborhood', 'Within_Fence']:
-                        if col in sessions.columns:
-                            sessions = sessions.drop(columns=[col])
-                    
-                    # Load and combine heat files
-                    heat_list = []
-                    for i, hfile in enumerate(hfiles, 1):
-                        df = pd.read_csv(hfile) if hfile.name.endswith(".csv") else pd.read_excel(hfile)
-                        heat_list.append(df)
-                        st.toast(f"📄 Heat file {i}/{len(hfiles)}: {hfile.name} - {len(df):,} rows, columns: {len(df.columns)}")
-                    
-                    # Check if all heat files have same columns
-                    if len(heat_list) > 1:
-                        first_cols = set(heat_list[0].columns)
-                        for i, df in enumerate(heat_list[1:], 2):
-                            if set(df.columns) != first_cols:
-                                missing = first_cols - set(df.columns)
-                                extra = set(df.columns) - first_cols
-                                st.warning(f"⚠️ Heat file {i} has different columns! Missing: {missing}, Extra: {extra}")
-                    
-                    heat = pd.concat(heat_list, ignore_index=True)
-                    st.toast(f"✅ Combined {len(hfiles)} heat file(s) - {len(heat):,} total rows")
-                    
-                    # Load and combine rides files
-                    rides_list = []
-                    for i, rfile in enumerate(rfiles, 1):
-                        df = pd.read_csv(rfile) if rfile.name.endswith(".csv") else pd.read_excel(rfile)
-                        rides_list.append(df)
-                        st.toast(f"📄 Rides file {i}/{len(rfiles)}: {rfile.name} - {len(df):,} rows")
-                    rides = pd.concat(rides_list, ignore_index=True)
-                    st.toast(f"✅ Combined {len(rfiles)} rides file(s) - {len(rides):,} total rows")
+                    # Load files
+                    sessions = pd.read_csv(sfile) if sfile.name.endswith(".csv") else pd.read_excel(sfile)
+                    heat = pd.read_csv(hfile) if hfile.name.endswith(".csv") else pd.read_excel(hfile)
+                    rides = pd.read_csv(rfile) if rfile.name.endswith(".csv") else pd.read_excel(rfile)
                     
                     # Assign sessions to areas using KDTree
                     from scipy.spatial import cKDTree
@@ -846,4 +808,3 @@ with tab2:
                         line_chart(chart_df, "", "Vehicles")
                     else:
                         st.info("No vehicle data")
-
