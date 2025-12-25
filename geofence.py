@@ -846,3 +846,4 @@ with tab2:
                         line_chart(chart_df, "", "Vehicles")
                     else:
                         st.info("No vehicle data")
+
