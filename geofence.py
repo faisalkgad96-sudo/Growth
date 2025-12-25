@@ -2,349 +2,591 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+from pathlib import Path
+from scipy.spatial import cKDTree
+import pickle
+from datetime import datetime
+import gc
 
+st.set_page_config(page_title="Supply & Demand Dashboard", layout="wide", page_icon="📊")
 
-# ----------------------------------------------------
-# PAGE
-# ----------------------------------------------------
-st.set_page_config(page_title="Supply & Demand Analytics", page_icon="📊", layout="wide")
-st.title("📊 Supply & Demand Analytics Dashboard")
-
-
-# ----------------------------------------------------
+# ============================================================================
 # CONSTANTS
-# ----------------------------------------------------
-DISPLAY_NAMES = {
-    "alexandria": "Alexandria",
-    "downtown": "Downtown",
-    "downtown 1": "Downtown",
-    "maadi": "Maadi",
-    "masr el gdeida": "Masr El Gdeida",
-    "masr el gedida": "Masr El Gdeida",  # Handle both spellings
-    "mg": "Masr El Gdeida",
-    "zahra el maadi": "Zahraa El Maadi",
-    "zahraa el maadi": "Zahraa El Maadi",
-}
+# ============================================================================
 
+# Area names - EXACT as they appear in raw data
+AREA_NAMES = [
+    "Alexandria",
+    "Downtown 1", 
+    "Maadi",
+    "Masr El Gedida",
+    "Zahraa El Maadi"
+]
+
+# Area colors for charts
 AREA_COLORS = {
     "Alexandria": "#4F9CF9",
-    "Downtown": "#7C4DFF",
+    "Downtown 1": "#7C4DFF",
     "Maadi": "#2DC26B",
-    "Masr El Gdeida": "#FF6B6B",
-    "Zahraa El Maadi": "#FFB020",
+    "Masr El Gedida": "#FF6B6B",
+    "Zahraa El Maadi": "#FFA726",
 }
 
+# Persistent storage
+DATA_DIR = Path("persistent_data")
+DATA_DIR.mkdir(exist_ok=True)
+DIST_POINTS_FILE = DATA_DIR / "distribution_points.pkl"
+ANALYZED_DATA_FILE = DATA_DIR / "analyzed_data.pkl"
 
-def pretty(a):
-    return DISPLAY_NAMES.get(str(a).lower(), str(a).title())
+# ============================================================================
+# HELPER FUNCTIONS - FILE I/O
+# ============================================================================
 
+def save_distribution_points(points):
+    """Save distribution points to disk"""
+    with open(DIST_POINTS_FILE, 'wb') as f:
+        pickle.dump(points, f)
 
-# ----------------------------------------------------
-# CHART UTIL
-# ----------------------------------------------------
-def bucket(df):
-    r = st.session_state.range_choice
-    if r == "Daily":
-        return df["timestamp"].dt.date
-    if r == "Weekly":
-        return df["timestamp"].dt.to_period("W").apply(lambda x: x.start_time.date())
-    return df["timestamp"].dt.to_period("M").apply(lambda x: x.start_time.date())
+def load_distribution_points():
+    """Load distribution points from disk"""
+    if DIST_POINTS_FILE.exists():
+        with open(DIST_POINTS_FILE, 'rb') as f:
+            return pickle.load(f)
+    return []
 
+def save_analyzed_data(sessions_agg, heat, rides):
+    """Save analyzed data to disk"""
+    data = {
+        'sessions_agg': sessions_agg,  # Pre-aggregated sessions
+        'heat': heat,
+        'rides': rides,
+        'timestamp': datetime.now()
+    }
+    with open(ANALYZED_DATA_FILE, 'wb') as f:
+        pickle.dump(data, f)
+
+def load_analyzed_data():
+    """Load analyzed data from disk"""
+    if ANALYZED_DATA_FILE.exists():
+        with open(ANALYZED_DATA_FILE, 'rb') as f:
+            return pickle.load(f)
+    return None
+
+# ============================================================================
+# HELPER FUNCTIONS - ASSIGNMENT
+# ============================================================================
+
+def assign_sessions_to_areas(sessions, dist_points):
+    """
+    Assign sessions to areas based on distribution points.
+    Optimized for large datasets (1M+ rows).
+    """
+    # Convert distribution points to DataFrame
+    all_points = pd.DataFrame(dist_points)
+    
+    # Find latitude/longitude columns (case-insensitive)
+    cols_lower = {c.lower(): c for c in sessions.columns}
+    lat_col = cols_lower.get('latitude', cols_lower.get('lat'))
+    lon_col = cols_lower.get('longitude', cols_lower.get('lon', cols_lower.get('lng')))
+    
+    if not lat_col or not lon_col:
+        raise ValueError(f"Sessions file must have 'Latitude' and 'Longitude' columns. Found: {sessions.columns.tolist()}")
+    
+    # Remove sessions with invalid coordinates (NaN, inf, or zero)
+    valid_mask = (
+        sessions[lat_col].notna() & 
+        sessions[lon_col].notna() &
+        np.isfinite(sessions[lat_col]) & 
+        np.isfinite(sessions[lon_col]) &
+        (sessions[lat_col] != 0) &
+        (sessions[lon_col] != 0)
+    )
+    
+    invalid_count = (~valid_mask).sum()
+    if invalid_count > 0:
+        st.warning(f"⚠️ Found {invalid_count:,} sessions with invalid coordinates - marking as 'Out of Fence'")
+    
+    # Mark invalid sessions immediately
+    sessions.loc[~valid_mask, 'Area'] = 'Out of Fence'
+    sessions.loc[~valid_mask, 'Neighborhood'] = 'Out of Fence'
+    
+    # Only process valid sessions
+    valid_sessions = sessions[valid_mask].copy()
+    
+    if len(valid_sessions) == 0:
+        st.error("No valid sessions found with proper coordinates!")
+        return sessions
+    
+    # Extract coordinates using detected column names
+    session_coords = valid_sessions[[lat_col, lon_col]].values
+    point_coords = all_points[["lat", "lon"]].values
+    
+    # Convert to radians
+    session_rad = np.radians(session_coords)
+    point_rad = np.radians(point_coords)
+    
+    # Convert to Cartesian coordinates for fast distance calculation
+    session_cartesian = np.column_stack([
+        np.cos(session_rad[:, 0]) * np.cos(session_rad[:, 1]),
+        np.cos(session_rad[:, 0]) * np.sin(session_rad[:, 1]),
+        np.sin(session_rad[:, 0])
+    ])
+    
+    point_cartesian = np.column_stack([
+        np.cos(point_rad[:, 0]) * np.cos(point_rad[:, 1]),
+        np.cos(point_rad[:, 0]) * np.sin(point_rad[:, 1]),
+        np.sin(point_rad[:, 0])
+    ])
+    
+    # Build KD-tree and find nearest points
+    tree = cKDTree(point_cartesian)
+    _, nearest_indices = tree.query(session_cartesian, k=1)
+    
+    # Calculate actual distances in meters
+    nearest_point_coords = point_rad[nearest_indices]
+    dlat = nearest_point_coords[:, 0] - session_rad[:, 0]
+    dlon = nearest_point_coords[:, 1] - session_rad[:, 1]
+    a = np.sin(dlat/2)**2 + np.cos(session_rad[:, 0]) * np.cos(nearest_point_coords[:, 0]) * np.sin(dlon/2)**2
+    c = 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+    distances_meters = c * 6371000
+    
+    # Assign areas (within 200m threshold)
+    within_threshold = distances_meters <= 200
+    valid_sessions.loc[:, 'Area'] = np.where(
+        within_threshold, 
+        all_points['area'].iloc[nearest_indices].values, 
+        'Out of Fence'
+    )
+    valid_sessions.loc[:, 'Neighborhood'] = np.where(
+        within_threshold,
+        all_points['neighborhood'].iloc[nearest_indices].values,
+        'Out of Fence'
+    )
+    
+    # Update the original sessions with assignments
+    sessions.loc[valid_mask, 'Area'] = valid_sessions['Area'].values
+    sessions.loc[valid_mask, 'Neighborhood'] = valid_sessions['Neighborhood'].values
+    
+    return sessions
+
+# ============================================================================
+# HELPER FUNCTIONS - AGGREGATION
+# ============================================================================
+
+def aggregate_sessions(sessions):
+    """
+    Aggregate sessions to reduce from millions of rows to thousands.
+    Groups by Area and Date (daily aggregation).
+    """
+    # Ensure timestamp exists and is valid
+    if 'timestamp' not in sessions.columns:
+        raise ValueError("Sessions must have 'timestamp' column before aggregation")
+    
+    # Remove any NaT timestamps
+    sessions = sessions[sessions['timestamp'].notna()].copy()
+    
+    if len(sessions) == 0:
+        # Return empty aggregation
+        return pd.DataFrame(columns=['Area', 'date', 'sessions_count'])
+    
+    # Create date column (daily aggregation) - keep as datetime
+    sessions['date'] = sessions['timestamp'].dt.floor('D')
+    
+    # Group and count
+    agg = sessions.groupby(['Area', 'date']).size().reset_index(name='sessions_count')
+    
+    return agg
+
+# ============================================================================
+# HELPER FUNCTIONS - CHARTING
+# ============================================================================
+
+def bucket_data(df, date_col, range_choice):
+    """Apply time bucketing based on range choice"""
+    if range_choice == "Daily":
+        return df[date_col].dt.floor("D")
+    elif range_choice == "Weekly":
+        return df[date_col].dt.to_period("W").dt.to_timestamp()
+    else:  # Monthly
+        return df[date_col].dt.to_period("M").dt.to_timestamp()
 
 def line_chart(df, title="", y_label=""):
-    # Reset index to get the date column (whatever it's named)
+    """Create line chart with legend"""
     df = df.reset_index()
-    
-    # Get the name of the first column (the date/bucket column)
     date_col = df.columns[0]
-    
-    # Melt using the first column as id
     df = df.melt(date_col, var_name="Series", value_name="Value")
-
-    # smoothing (moving average)
+    
+    # Apply smoothing if enabled
     if st.session_state.get("smooth_enabled", False):
         win = st.session_state.get("smooth_window", 3)
         df["Value"] = df.groupby("Series")["Value"].transform(
             lambda s: s.rolling(win, min_periods=1).mean()
         )
-
-    selection = alt.selection_multi(fields=["Series"], bind="legend")
     
-    # Get colors only for series that exist in the data
+    # Get colors for series that exist in data
     series_in_data = df["Series"].unique()
     color_domain = [s for s in AREA_COLORS.keys() if s in series_in_data]
     color_range = [AREA_COLORS[s] for s in color_domain]
-
+    
+    selection = alt.selection_multi(fields=["Series"], bind="legend")
+    
     chart = (
         alt.Chart(df)
-        .mark_line(point=True, strokeWidth=3)
+        .mark_line(point=alt.OverlayMarkDef(size=80, filled=True), strokeWidth=4)
         .encode(
-            x=alt.X(f"{date_col}:T", title=""),
-            y=alt.Y("Value:Q", title=y_label, scale=alt.Scale(zero=False)),  # Dynamic scaling
+            x=alt.X(
+                f"{date_col}:T", 
+                title="",
+                axis=alt.Axis(
+                    format="%b %d",  # Format: "Dec 03" (no time)
+                    labelAngle=-45,
+                    labelFontSize=14,
+                    labelOverlap="greedy"  # Prevent duplicate labels
+                )
+            ),
+            y=alt.Y("Value:Q", title=y_label, scale=alt.Scale(zero=False)),
             color=alt.Color(
                 "Series:N",
-                scale=alt.Scale(
-                    domain=color_domain,  # Only colors for visible series
-                    range=color_range,
-                ),
-                legend=alt.Legend(orient="bottom"),
+                scale=alt.Scale(domain=color_domain, range=color_range),
+                legend=alt.Legend(orient="bottom", labelFontSize=12, titleFontSize=13),
             ),
             opacity=alt.condition(selection, alt.value(1), alt.value(0.2)),
-            tooltip=[f"{date_col}:T", "Series:N", "Value:Q"],
+            tooltip=[
+                alt.Tooltip(f"{date_col}:T", title="Date", format="%b %d, %Y"),
+                alt.Tooltip("Series:N", title="Area"),
+                alt.Tooltip("Value:Q", title=y_label, format=",.1f")
+            ],
         )
         .add_selection(selection)
-        .properties(title=title, height=310)
+        .properties(title=title, height=400)  # Increased from 310 to 400
     )
-
+    
     st.altair_chart(chart, use_container_width=True)
 
+# ============================================================================
+# SESSION STATE INITIALIZATION
+# ============================================================================
 
-# ----------------------------------------------------
-# DATA LOAD
-# ----------------------------------------------------
-import pickle
-import os
-from pathlib import Path
+if "distribution_points" not in st.session_state:
+    st.session_state.distribution_points = load_distribution_points()
 
-# Create data directory for persistence
-DATA_DIR = Path("persistent_data")
-DATA_DIR.mkdir(exist_ok=True)
-
-DIST_POINTS_FILE = DATA_DIR / "distribution_points.pkl"
-ANALYZED_DATA_FILE = DATA_DIR / "analyzed_data.pkl"
-
-# Load saved data on startup
-def load_persistent_data():
-    """Load distribution points and analyzed data from disk"""
-    # Load distribution points
-    if DIST_POINTS_FILE.exists():
-        try:
-            with open(DIST_POINTS_FILE, 'rb') as f:
-                saved_points = pickle.load(f)
-                st.session_state.distribution_points = saved_points['points']
-                st.session_state.points_updated = saved_points.get('updated')
-        except Exception as e:
-            st.warning(f"Could not load saved distribution points: {e}")
-    
-    # Load analyzed data
-    if ANALYZED_DATA_FILE.exists():
-        try:
-            with open(ANALYZED_DATA_FILE, 'rb') as f:
-                saved_data = pickle.load(f)
-                st.session_state.sessions = saved_data['sessions']
-                st.session_state.heat = saved_data['heat']
-                st.session_state.rides = saved_data['rides']
-                st.session_state.data_updated = saved_data.get('updated')
-                st.session_state.data_loaded = True
-        except Exception as e:
-            st.warning(f"Could not load saved data: {e}")
-
-def save_distribution_points():
-    """Save distribution points to disk"""
-    try:
-        with open(DIST_POINTS_FILE, 'wb') as f:
-            pickle.dump({
-                'points': st.session_state.distribution_points,
-                'updated': st.session_state.points_updated
-            }, f)
-    except Exception as e:
-        st.error(f"Could not save distribution points: {e}")
-
-def save_analyzed_data():
-    """Save analyzed data to disk"""
-    try:
-        with open(ANALYZED_DATA_FILE, 'wb') as f:
-            pickle.dump({
-                'sessions': st.session_state.sessions,
-                'heat': st.session_state.heat,
-                'rides': st.session_state.rides,
-                'updated': st.session_state.data_updated
-            }, f)
-    except Exception as e:
-        st.error(f"Could not save analyzed data: {e}")
-
-# Initialize session state
 if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
-if "distribution_points" not in st.session_state:
-    st.session_state.distribution_points = []
-if "points_updated" not in st.session_state:
-    st.session_state.points_updated = None
-if "data_updated" not in st.session_state:
-    st.session_state.data_updated = None
-if "rides" not in st.session_state:
-    st.session_state.rides = pd.DataFrame()
-if "initialized" not in st.session_state:
-    st.session_state.initialized = False
-    load_persistent_data()  # Load saved data on first run
+    
+if "range_choice" not in st.session_state:
+    st.session_state.range_choice = "Daily"
 
-with st.sidebar:
-    st.header("📂 Upload Data")
+if "smooth_enabled" not in st.session_state:
+    st.session_state.smooth_enabled = False
+
+if "smooth_window" not in st.session_state:
+    st.session_state.smooth_window = 3
+
+# Try to load previously analyzed data
+if not st.session_state.data_loaded:
+    loaded_data = load_analyzed_data()
+    if loaded_data:
+        st.session_state.sessions_agg = loaded_data['sessions_agg']
+        st.session_state.heat = loaded_data['heat']
+        st.session_state.rides = loaded_data['rides']
+        st.session_state.data_updated = loaded_data['timestamp']
+        st.session_state.data_loaded = True
+
+# ============================================================================
+# SIDEBAR - DISTRIBUTION POINTS
+# ============================================================================
+
+st.sidebar.title("📍 1. Distribution Points")
+
+with st.sidebar.expander("➕ Add Points from File", expanded=False):
+    area_for_upload = st.selectbox("Select Area", AREA_NAMES, key="area_upload_select")
     
-    # Distribution Points
-    st.subheader("1. Distribution Points")
+    points_file = st.file_uploader(
+        f"Upload points for {area_for_upload}",
+        type=["csv", "xlsx"],
+        key=f"points_upload_{area_for_upload}",
+        help="File should have columns: lat, lng, point name (or neighborhood)"
+    )
     
-    # Show status first if points exist
-    if st.session_state.distribution_points:
-        st.success(f"✅ {len(st.session_state.distribution_points)} areas saved")
-        st.caption(f"📍 {', '.join([p['area'] for p in st.session_state.distribution_points])}")
-        if st.session_state.points_updated:
-            st.caption(f"🕒 Updated: {st.session_state.points_updated.strftime('%m/%d %I:%M%p')}")
-        if st.button("Clear Points"):
-            st.session_state.distribution_points = []
-            st.session_state.points_updated = None
-            if DIST_POINTS_FILE.exists():
-                DIST_POINTS_FILE.unlink()  # Delete saved file
+    if points_file and st.button(f"Load Points for {area_for_upload}"):
+        try:
+            # Load file
+            if points_file.name.endswith('.csv'):
+                df = pd.read_csv(points_file)
+            else:
+                df = pd.read_excel(points_file)
+            
+            # Expected columns: area, lat, lng, point name (or neighborhood)
+            # Map column names (case-insensitive)
+            cols_lower = {c.lower(): c for c in df.columns}
+            
+            lat_col = cols_lower.get('lat', cols_lower.get('latitude'))
+            lng_col = cols_lower.get('lng', cols_lower.get('longitude', cols_lower.get('lon')))
+            name_col = cols_lower.get('point name', cols_lower.get('neighborhood', cols_lower.get('name')))
+            
+            if not (lat_col and lng_col and name_col):
+                st.error(f"File must have columns: 'lat', 'lng', and 'point name' (or 'neighborhood')")
+                st.info(f"Found columns: {df.columns.tolist()}")
+            else:
+                # Add all points from file
+                new_points = []
+                for _, row in df.iterrows():
+                    new_points.append({
+                        "area": area_for_upload,
+                        "neighborhood": str(row[name_col]),
+                        "lat": float(row[lat_col]),
+                        "lon": float(row[lng_col])
+                    })
+                
+                # Add to existing points
+                st.session_state.distribution_points.extend(new_points)
+                save_distribution_points(st.session_state.distribution_points)
+                
+                st.success(f"✅ Added {len(new_points)} points for {area_for_upload}!")
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"Error loading file: {str(e)}")
+
+if st.session_state.distribution_points:
+    st.sidebar.success(f"✅ {len(st.session_state.distribution_points)} points saved")
+    
+    # Show count per area
+    points_df = pd.DataFrame(st.session_state.distribution_points)
+    area_counts = points_df.groupby('area').size()
+    
+    with st.sidebar.expander("📋 View Points by Area", expanded=False):
+        for area in AREA_NAMES:
+            count = area_counts.get(area, 0)
+            st.write(f"**{area}:** {count} points")
+        
+        st.markdown("---")
+        st.dataframe(points_df, use_container_width=True, hide_index=True)
+    
+    if st.sidebar.button("🗑️ Clear All Points"):
+        st.session_state.distribution_points = []
+        if DIST_POINTS_FILE.exists():
+            DIST_POINTS_FILE.unlink()
+        st.rerun()
+
+# ============================================================================
+# SIDEBAR - DATA FILES
+# ============================================================================
+
+st.sidebar.markdown("---")
+st.sidebar.title("📂 2. Data Files")
+
+if st.session_state.data_loaded:
+    st.sidebar.success("✅ Data loaded")
+    if hasattr(st.session_state, 'data_updated'):
+        st.sidebar.caption(f"Updated: {st.session_state.data_updated.strftime('%Y-%m-%d %H:%M')}")
+    
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if st.button("🔄 Re-analyze", use_container_width=True):
+            st.session_state.data_loaded = False
             st.rerun()
-    
-    with st.expander("➕ Add Points", expanded=len(st.session_state.distribution_points) == 0):
-        area_name = st.text_input("Area Name", key="new_area")
-        points_file = st.file_uploader("Points File (CSV/Excel)", type=["csv", "xlsx"], key="new_points")
-        
-        if st.button("Add Points"):
-            if area_name and points_file:
-                try:
-                    points_df = pd.read_csv(points_file) if points_file.name.endswith(".csv") else pd.read_excel(points_file)
-                    points_df['area'] = area_name
-                    st.session_state.distribution_points.append({'area': area_name, 'data': points_df})
-                    st.session_state.points_updated = pd.Timestamp.now()
-                    save_distribution_points()  # Save to disk
-                    st.success(f"✅ Added {len(points_df)} points for {area_name}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
-            else:
-                st.warning("Enter area name and upload file")
-    
-    st.markdown("---")
-    st.subheader("2. Data Files")
-    
-    # Show analyzed data status
-    if st.session_state.data_loaded:
-        st.success("✅ Data analyzed & ready")
-        if st.session_state.data_updated:
-            st.caption(f"🕒 Analyzed: {st.session_state.data_updated.strftime('%m/%d %I:%M%p')}")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Re-analyze", use_container_width=True):
-                st.session_state.data_loaded = False
-                st.rerun()
-        with col2:
-            if st.button("Clear Data", use_container_width=True):
-                st.session_state.data_loaded = False
-                st.session_state.data_updated = None
-                if ANALYZED_DATA_FILE.exists():
-                    ANALYZED_DATA_FILE.unlink()  # Delete saved file
-                st.rerun()
-    
-    # Upload section - only show if no data loaded
-    if not st.session_state.data_loaded:
-        st.markdown("**Upload Files:**")
-        
-        sfile = st.file_uploader("Sessions", type=["csv", "xlsx"], key="sessions_upload")
-        hfile = st.file_uploader("Heat Data", type=["csv", "xlsx"], key="heat_upload")
-        rfile = st.file_uploader("Rides Data", type=["csv", "xlsx"], key="rides_upload")
-
-        if st.button("🚀 Analyze", type="primary", use_container_width=True):
-            if not (sfile and hfile and rfile):
-                st.error("Upload all three files")
-            elif not st.session_state.distribution_points:
-                st.error("Add distribution points first")
-            else:
-                with st.spinner("Processing..."):
-                    # Load files
-                    sessions = pd.read_csv(sfile) if sfile.name.endswith(".csv") else pd.read_excel(sfile)
-                    heat = pd.read_csv(hfile) if hfile.name.endswith(".csv") else pd.read_excel(hfile)
-                    rides = pd.read_csv(rfile) if rfile.name.endswith(".csv") else pd.read_excel(rfile)
-                    
-                    # Assign sessions to areas using KDTree
-                    from scipy.spatial import cKDTree
-                    
-                    # Combine all distribution points
-                    all_points = pd.concat([p['data'] for p in st.session_state.distribution_points], ignore_index=True)
-                    
-                    # Get coordinates
-                    session_coords = sessions[['Latitude', 'Longitude']].values.astype(float)
-                    point_coords = all_points[['lat', 'lng']].values.astype(float)
-                    
-                    # Validate
-                    session_valid = np.isfinite(session_coords).all(axis=1)
-                    sessions = sessions[session_valid].reset_index(drop=True)
-                    session_coords = session_coords[session_valid]
-                    
-                    # Convert to radians
-                    session_rad = np.radians(session_coords)
-                    point_rad = np.radians(point_coords)
-                    
-                    # Build KDTree
-                    def latlon_to_cartesian(lat_rad, lon_rad):
-                        x = np.cos(lat_rad) * np.cos(lon_rad)
-                        y = np.cos(lat_rad) * np.sin(lon_rad)
-                        z = np.sin(lat_rad)
-                        return np.column_stack([x, y, z])
-                    
-                    point_cartesian = latlon_to_cartesian(point_rad[:, 0], point_rad[:, 1])
-                    tree = cKDTree(point_cartesian)
-                    session_cartesian = latlon_to_cartesian(session_rad[:, 0], session_rad[:, 1])
-                    
-                    # Find nearest
-                    _, nearest_indices = tree.query(session_cartesian, k=1)
-                    
-                    # Calculate distances
-                    nearest_point_coords = point_rad[nearest_indices]
-                    dlat = nearest_point_coords[:, 0] - session_rad[:, 0]
-                    dlon = nearest_point_coords[:, 1] - session_rad[:, 1]
-                    a = np.sin(dlat/2)**2 + np.cos(session_rad[:, 0]) * np.cos(nearest_point_coords[:, 0]) * np.sin(dlon/2)**2
-                    c = 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
-                    distances_meters = c * 6371000
-                    
-                    # Assign
-                    within_threshold = distances_meters <= 200
-                    sessions['Assigned_Area'] = np.where(within_threshold, all_points['area'].iloc[nearest_indices].values, 'Out of Fence')
-                    sessions['Assigned_Neighborhood'] = np.where(within_threshold, all_points['neighborhood'].iloc[nearest_indices].values, 'Out of Fence')
-                    sessions['Within_Fence'] = np.where(within_threshold, 'Yes', 'No')
-                    
-                    # Show assignment summary
-                    area_counts = sessions['Assigned_Area'].value_counts()
-                    st.toast(f"📍 Areas found: {', '.join([f'{area} ({count:,})' for area, count in area_counts.items() if area != 'Out of Fence'])}")
-                    
-                    # Extract timestamps
-                    for df in (sessions, heat, rides):
-                        for c in df.columns:
-                            if "date" in c.lower() or "time" in c.lower():
-                                df["timestamp"] = pd.to_datetime(df[c], errors="coerce")
-                                break
-
-                    st.session_state.sessions = sessions
-                    st.session_state.heat = heat
-                    st.session_state.rides = rides
-                    st.session_state.data_loaded = True
-                    st.session_state.data_updated = pd.Timestamp.now()
-                    save_analyzed_data()  # Save to disk for persistence
-                    
-                    st.success("✅ Analysis complete!")
-                    st.rerun()
+    with col2:
+        if st.button("🗑️ Clear Data", use_container_width=True):
+            st.session_state.data_loaded = False
+            st.session_state.data_updated = None
+            if ANALYZED_DATA_FILE.exists():
+                ANALYZED_DATA_FILE.unlink()
+            st.rerun()
 
 if not st.session_state.data_loaded:
+    st.sidebar.markdown("**Upload Files:**")
+    st.sidebar.caption("💡 You can upload multiple files - they will be combined automatically")
+    
+    sfiles = st.sidebar.file_uploader("Sessions", type=["csv", "xlsx"], accept_multiple_files=True, key="sessions_upload")
+    hfiles = st.sidebar.file_uploader("Heat Data", type=["csv", "xlsx"], accept_multiple_files=True, key="heat_upload")
+    
+    if st.sidebar.button("🚀 Analyze", type="primary", use_container_width=True):
+        if not (sfiles and hfiles):
+            st.sidebar.error("Upload at least one file for each type")
+        elif not st.session_state.distribution_points:
+            st.sidebar.error("Add distribution points first")
+        else:
+            # Create progress containers
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                # ====================================================================
+                # PROCESS SESSIONS FILES (HEAVY - 14M+ rows)
+                # ====================================================================
+                status_text.text("📊 Processing sessions files...")
+                sessions_agg_list = []
+                
+                for i, sfile in enumerate(sfiles):
+                    progress = (i / (len(sfiles) + len(hfiles)))
+                    progress_bar.progress(progress)
+                    status_text.text(f"📊 Processing sessions file {i+1}/{len(sfiles)}: {sfile.name}")
+                    
+                    # Load ONE file at a time
+                    if sfile.name.endswith('.csv'):
+                        sessions = pd.read_csv(sfile)
+                    else:
+                        sessions = pd.read_excel(sfile)
+                    
+                    status_text.text(f"📊 Loaded {len(sessions):,} sessions from {sfile.name}")
+                    
+                    # Parse timestamp - use Session_Date (has actual date)
+                    # Created At (Local) only has time, not full datetime
+                    if 'Session_Date' in sessions.columns:
+                        sessions['timestamp'] = pd.to_datetime(sessions['Session_Date'], errors='coerce')
+                    elif 'Created At (Local)' in sessions.columns:
+                        sessions['timestamp'] = pd.to_datetime(sessions['Created At (Local)'], errors='coerce')
+                    else:
+                        # Try to find any date column
+                        for col in sessions.columns:
+                            if 'date' in col.lower():
+                                sessions['timestamp'] = pd.to_datetime(sessions[col], errors='coerce')
+                                break
+                    
+                    # Drop sessions with invalid timestamps
+                    if 'timestamp' not in sessions.columns:
+                        st.error(f"❌ No date column found in {sfile.name}! Need 'Session_Date' or 'Created At (Local)'")
+                        continue
+                    
+                    invalid_timestamps = sessions['timestamp'].isna().sum()
+                    if invalid_timestamps > 0:
+                        st.warning(f"⚠️ Removing {invalid_timestamps:,} sessions with invalid timestamps from {sfile.name}")
+                        sessions = sessions[sessions['timestamp'].notna()].copy()
+                    
+                    if len(sessions) == 0:
+                        st.error(f"❌ No valid sessions with timestamps in {sfile.name}! Skipping file.")
+                        continue
+                    
+                    # Assign to areas (HEAVY computation)
+                    status_text.text(f"🗺️ Assigning {len(sessions):,} sessions to areas...")
+                    sessions = assign_sessions_to_areas(sessions, st.session_state.distribution_points)
+                    
+                    # IMMEDIATELY aggregate to reduce size
+                    status_text.text(f"📉 Aggregating sessions from {sfile.name}...")
+                    agg = aggregate_sessions(sessions)
+                    sessions_agg_list.append(agg)
+                    
+                    # Free memory
+                    del sessions
+                    gc.collect()
+                    
+                    status_text.text(f"✅ Processed {sfile.name} → {len(agg):,} aggregated rows")
+                
+                # Combine all aggregated sessions
+                status_text.text("🔗 Combining aggregated sessions...")
+                
+                if len(sessions_agg_list) == 0:
+                    st.error("❌ No valid sessions were processed from any files!")
+                    st.stop()
+                
+                sessions_agg = pd.concat(sessions_agg_list, ignore_index=True)
+                sessions_agg = sessions_agg.groupby(['Area', 'date']).sum().reset_index()
+                
+                status_text.text(f"✅ Total sessions aggregated: {len(sessions_agg):,} rows (from {sessions_agg['sessions_count'].sum():,} total sessions)")
+                
+                # Free memory
+                del sessions_agg_list
+                gc.collect()
+                
+                # ====================================================================
+                # PROCESS HEATDATA FILES (2M+ rows)
+                # ====================================================================
+                status_text.text("🔥 Processing heatdata files...")
+                heat_list = []
+                
+                for i, hfile in enumerate(hfiles):
+                    progress = ((len(sfiles) + i) / (len(sfiles) + len(hfiles)))
+                    progress_bar.progress(progress)
+                    status_text.text(f"🔥 Loading heatdata file {i+1}/{len(hfiles)}: {hfile.name}")
+                    
+                    if hfile.name.endswith('.csv'):
+                        heat = pd.read_csv(hfile)
+                    else:
+                        heat = pd.read_excel(hfile)
+                    
+                    heat_list.append(heat)
+                    status_text.text(f"✅ Loaded {len(heat):,} rows from {hfile.name}")
+                
+                # Combine all heatdata
+                status_text.text("🔗 Combining heatdata files...")
+                heat = pd.concat(heat_list, ignore_index=True)
+                
+                # Parse timestamp
+                heat['timestamp'] = pd.to_datetime(heat['Start Date'], errors='coerce')
+                
+                # Optimize dtypes
+                heat['Area'] = heat['Area'].astype('category')
+                
+                status_text.text(f"✅ Total heatdata: {len(heat):,} rows")
+                
+                # Free memory
+                del heat_list
+                gc.collect()
+                
+                # ====================================================================
+                # SAVE EVERYTHING
+                # ====================================================================
+                progress_bar.progress(0.95)
+                status_text.text("💾 Saving analyzed data...")
+                
+                # Create empty rides dataframe (not used)
+                rides = pd.DataFrame()
+                
+                save_analyzed_data(sessions_agg, heat, rides)
+                
+                st.session_state.sessions_agg = sessions_agg
+                st.session_state.heat = heat
+                st.session_state.rides = rides
+                st.session_state.data_updated = datetime.now()
+                st.session_state.data_loaded = True
+                
+                progress_bar.progress(1.0)
+                status_text.text("✅ Analysis complete!")
+                
+                st.success(f"✅ Processed {sessions_agg['sessions_count'].sum():,} sessions and {len(heat):,} heatdata rows!")
+                st.balloons()
+                
+                # Wait a bit then rerun
+                import time
+                time.sleep(2)
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Error during analysis: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+
+# ============================================================================
+# MAIN DASHBOARD
+# ============================================================================
+
+if not st.session_state.data_loaded:
+    st.title("📊 Supply & Demand Dashboard")
+    st.info("👈 Upload data files and add distribution points in the sidebar to get started")
     st.stop()
 
-sessions = st.session_state.sessions.copy()
-heat = st.session_state.heat.copy()
-rides = st.session_state.rides.copy()
+# Get data from session state
+sessions_agg = st.session_state.sessions_agg
+heat = st.session_state.heat
+rides = st.session_state.rides
 
-
-# ----------------------------------------------------
+# ============================================================================
 # FILTERS
-# ----------------------------------------------------
+# ============================================================================
+
+st.title("📊 Supply & Demand Dashboard")
+st.markdown("---")
 st.markdown("### 🔍 Filters")
 
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
-    areas = sorted(sessions.get("Assigned_Area", pd.Series()).dropna().unique())
-    areas = [a for a in areas if a not in ['Out of Fence', 'Error']]
-    selected = st.multiselect("Areas", areas, default=areas)
+    selected_areas = st.multiselect(
+        "Areas",
+        AREA_NAMES,
+        default=AREA_NAMES
+    )
 
 with c2:
     st.session_state.range_choice = st.selectbox("Range", ["Daily", "Weekly", "Monthly"])
@@ -356,455 +598,281 @@ with c4:
     if st.session_state.smooth_enabled:
         st.session_state.smooth_window = st.slider("Window", 2, 7, 3)
 
-date_min = sessions["timestamp"].min().date()
-date_max = sessions["timestamp"].max().date()
+# Date range filter
+date_min = sessions_agg['date'].min()
+date_max = sessions_agg['date'].max()
 
-start, end = st.date_input(
+# Handle NaT values
+if pd.isna(date_min) or pd.isna(date_max):
+    st.error("⚠️ No valid dates found in sessions data. Check 'Created At (Local)' column.")
+    st.stop()
+
+start_date, end_date = st.date_input(
     "Date Range",
-    value=(date_min, date_max),
-    min_value=date_min,
-    max_value=date_max,
+    value=(date_min.date(), date_max.date()),
+    min_value=date_min.date(),
+    max_value=date_max.date(),
 )
 
-sessions = sessions[
-    (sessions["timestamp"].dt.date >= start) & (sessions["timestamp"].dt.date <= end)
-]
-heat = heat[(heat["timestamp"].dt.date >= start) & (heat["timestamp"].dt.date <= end)]
+# ============================================================================
+# APPLY FILTERS
+# ============================================================================
 
-# Only filter rides if it has data
-if len(rides) > 0 and "timestamp" in rides.columns:
-    rides = rides[(rides["timestamp"].dt.date >= start) & (rides["timestamp"].dt.date <= end)]
+# Filter sessions_agg
+sessions_filtered = sessions_agg[
+    (sessions_agg['Area'].isin(selected_areas)) &
+    (sessions_agg['date'] >= pd.to_datetime(start_date)) &
+    (sessions_agg['date'] <= pd.to_datetime(end_date))
+].copy()
 
-sessions = sessions[sessions["Assigned_Area"].isin(selected)]
+# Filter heat
+heat_filtered = heat[
+    (heat['Area'].isin(selected_areas)) &
+    (heat['timestamp'].dt.date >= start_date) &
+    (heat['timestamp'].dt.date <= end_date)
+].copy()
 
-# Filter heat data by area
-heat_cols = {c.lower(): c for c in heat.columns}
-heat_area_col = next((heat_cols[k] for k in ["assigned_area", "area"] if k in heat_cols), None)
+# Remove unused categories if Area is categorical
+if heat_filtered['Area'].dtype.name == 'category':
+    heat_filtered['Area'] = heat_filtered['Area'].cat.remove_unused_categories()
 
-if heat_area_col and len(selected) > 0:
-    # Normalize heat area names
-    heat['area_normalized'] = heat[heat_area_col].apply(lambda x: pretty(x) if pd.notna(x) else x)
-    # Normalize selected values too to ensure matching
-    selected_normalized = [pretty(s) for s in selected]
-    # Filter using normalized names
-    heat = heat[heat['area_normalized'].isin(selected_normalized)]
+# Filter rides
+if len(rides) > 0 and 'timestamp' in rides.columns:
+    rides_filtered = rides[
+        (rides['timestamp'].dt.date >= start_date) &
+        (rides['timestamp'].dt.date <= end_date)
+    ].copy()
+else:
+    rides_filtered = rides.copy()
 
-# Normalize rides area names to match selected areas
-rides_cols = {c.lower(): c for c in rides.columns}
-rides_area_col = next((rides_cols[k] for k in ["area", "assigned_area"] if k in rides_cols), None)
-
-if rides_area_col and len(rides) > 0:
-    # Normalize area names in rides to match sessions
-    rides[rides_area_col] = rides[rides_area_col].apply(lambda x: pretty(x) if pd.notna(x) else x)
-    # Filter by selected areas
-    if len(selected) > 0:
-        rides = rides[rides[rides_area_col].isin(selected)]
-
-sessions["bucket"] = bucket(sessions)
-heat["bucket"] = bucket(heat)
-if len(rides) > 0 and "timestamp" in rides.columns:
-    rides["bucket"] = bucket(rides)
-
-
-# column lookups (heat_area_col already defined above)
-eff_col = next(
-    (heat_cols[k] for k in ["effective active vehicles", "effective_vehicles", "effective vehicles"] if k in heat_cols),
-    None,
-)
-rides_col = next((heat_cols[k] for k in ["rides", "sessions rides", "supply"] if k in heat_cols), None)
-
-
-# ----------------------------------------------------
+# ============================================================================
 # SCORECARDS
-# ----------------------------------------------------
+# ============================================================================
+
 st.markdown("---")
 st.markdown("### 📊 Key Metrics")
 
 m1, m2, m3, m4, m5 = st.columns(5)
 
-total_sessions = len(sessions)
+# Total Sessions
+total_sessions = int(sessions_filtered['sessions_count'].sum())
 m1.metric("📍 Total Sessions", f"{total_sessions:,}")
 
-if "Within_Fence" in sessions.columns:
-    wf = (sessions["Within_Fence"] == "Yes").sum()
-    m2.metric("🟢 Within 200m", f"{wf:,}", delta=f"{(wf / total_sessions * 100 if total_sessions else 0):.1f}%")
-else:
-    m2.metric("🟢 Within 200m", "—")
+# Within 200m (sessions not marked as Out of Fence)
+sessions_in_fence = sessions_filtered[sessions_filtered['Area'] != 'Out of Fence']['sessions_count'].sum()
+pct_in_fence = (sessions_in_fence / total_sessions * 100) if total_sessions > 0 else 0
+m2.metric("🟢 Within 200m", f"{int(sessions_in_fence):,}", delta=f"{pct_in_fence:.1f}%")
 
-if rides_col:
-    total_rides = int(heat[rides_col].sum())
-else:
-    total_rides = len(heat)
-
+# Total Rides (from heatdata)
+total_rides = int(heat_filtered['Rides'].sum())
 m3.metric("🚗 Total Rides", f"{total_rides:,}")
 
-fulfill = (total_rides / total_sessions * 100) if total_sessions else 0
-m4.metric("📈 Fulfillment", f"{fulfill:.1f}%")
+# Fulfillment %
+fulfillment = (total_rides / total_sessions * 100) if total_sessions > 0 else 0
+m4.metric("📈 Fulfillment", f"{fulfillment:.1f}%")
 
-if eff_col:
-    m5.metric("🚕 Avg Vehicles", f"{heat[eff_col].mean():.1f}")
-else:
-    m5.metric("🚕 Avg Vehicles", "—")
+# Average Active Vehicles across all selected days
+# Calculate per-snapshot totals (sum neighborhoods), then average across all snapshots
+active_per_snapshot = heat_filtered.groupby('timestamp')['Active Vehicles'].sum()
+avg_active_vehicles = active_per_snapshot.mean() * 1.075  # Apply same 7.5% adjustment
+m5.metric("🚕 Avg Active Vehicles", f"{avg_active_vehicles:.1f}")
+
+# ============================================================================
+# CHARTS
+# ============================================================================
 
 st.markdown("---")
 
-
-# ----------------------------------------------------
-# TABS
-# ----------------------------------------------------
+# Create tabs
 tab1, tab2 = st.tabs(["📊 Overview", "🏘️ Neighborhood View"])
 
 with tab1:
-
-    # -------------------- Sessions + Neighborhoods --------------------
-    a1, a2 = st.columns(2)
-
-    with a1:
-        st.subheader("Sessions")
-        t = sessions.groupby(["bucket", "Assigned_Area"]).size().unstack().fillna(0)
-        t.columns = [pretty(c) for c in t.columns]
-        line_chart(t, "Sessions", "Sessions")
-
-    with a2:
-        st.subheader("Top Neighborhoods")
-
-        neigh = (
-            sessions.groupby(["bucket", "Assigned_Neighborhood"])
-            .size()
-            .unstack()
-            .fillna(0)
-        )
-        top = neigh.sum().sort_values(ascending=False).head(5).index
-
-        df = neigh[top].reset_index().melt(
-            "bucket", var_name="Neighborhood", value_name="Sessions"
-        )
-
-        selection = alt.selection_multi(fields=["Neighborhood"], bind="legend")
-
-        chart = (
-            alt.Chart(df)
-            .mark_line(point=True, strokeWidth=3)
-            .encode(
-                x=alt.X("bucket:T", title=""),
-                y=alt.Y("Sessions:Q", title="Sessions", scale=alt.Scale(zero=False)),  # Dynamic scaling
-                color="Neighborhood:N",
-                opacity=alt.condition(selection, alt.value(1), alt.value(0.2)),
-                tooltip=["bucket:T", "Neighborhood:N", "Sessions:Q"],
-            )
-            .add_selection(selection)
-            .properties(title="Top Neighborhoods", height=310)
-        )
-
-        st.altair_chart(chart, use_container_width=True)
-
+    # ========================================================================
+    # CHART 1: SESSIONS (FULL WIDTH)
+    # ========================================================================
+    st.subheader("Sessions")
+    
+    # Apply bucketing
+    sessions_filtered['bucket'] = bucket_data(sessions_filtered, 'date', st.session_state.range_choice)
+    
+    # Group by bucket and area
+    sessions_chart = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
+    
+    if len(sessions_chart) > 0:
+        line_chart(sessions_chart, "", "Sessions")
+    else:
+        st.info("No session data for selected filters")
+    
     st.markdown("---")
-
-    # -------------------- Rides + Effective Vehicles --------------------
-    b1, b2 = st.columns(2)
-
-    with b1:
-        st.subheader("Rides")
-
-        if heat_area_col:
-            rides = heat.groupby(["bucket", "area_normalized"]).size().unstack().fillna(0)
-            rides.columns = [pretty(c) for c in rides.columns]
-            line_chart(rides, "Rides", "Rides")
-        else:
-            st.info("No area column in heat data")
-
-    with b2:
-        st.subheader("Effective Vehicles")
-
-        if heat_area_col and eff_col:
-            eff = (
-                heat.groupby(["bucket", "area_normalized"])[eff_col]
-                .mean()
-                .unstack()
-                .fillna(0)
-            )
-            eff.columns = [pretty(c) for c in eff.columns]
-            line_chart(eff, "Effective Vehicles", "Vehicles")
-        else:
-            st.info("Vehicle metrics not found")
-
-    # -------------------- Fulfillment --------------------
+    
+    # ========================================================================
+    # CHART 2: RIDES (FULL WIDTH)
+    # ========================================================================
+    st.subheader("Rides")
+    
+    # Apply bucketing
+    heat_filtered['bucket'] = bucket_data(heat_filtered, 'timestamp', st.session_state.range_choice)
+    
+    # Group by bucket and area, SUM rides
+    rides_chart = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
+    
+    if len(rides_chart) > 0:
+        line_chart(rides_chart, "", "Rides")
+    else:
+        st.info("No rides data for selected filters")
+    
     st.markdown("---")
+    
+    # ========================================================================
+    # CHART 3: FULFILLMENT % (FULL WIDTH)
+    # ========================================================================
     st.subheader("Fulfillment %")
-
-    if heat_area_col:
-        rides = heat.groupby(["bucket", "area_normalized"]).size().unstack().fillna(0)
-        rides.columns = [pretty(c) for c in rides.columns]
-
-        sess = sessions.groupby(["bucket", "Assigned_Area"]).size().unstack().fillna(0)
-        sess.columns = [pretty(c) for c in sess.columns]
-
-        rides, sess = rides.align(sess, fill_value=0)
-
-        fulfill_df = (rides / sess.replace(0, np.nan)) * 100
-        fulfill_df = fulfill_df.fillna(0)
-
-        line_chart(fulfill_df, "Fulfillment %", "Percent")
+    
+    # Align sessions and rides by bucket and area
+    sessions_for_fulfill = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
+    rides_for_fulfill = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
+    
+    # Align indices
+    sessions_aligned, rides_aligned = sessions_for_fulfill.align(rides_for_fulfill, fill_value=0)
+    
+    # Calculate fulfillment
+    fulfillment_chart = (rides_aligned / sessions_aligned.replace(0, np.nan)) * 100
+    fulfillment_chart = fulfillment_chart.fillna(0)
+    
+    if len(fulfillment_chart) > 0:
+        line_chart(fulfillment_chart, "", "Percent")
     else:
-        st.info("Cannot compute fulfillment (area missing in heat data).")
-    
-    # -------------------- Additional Metrics --------------------
-    st.markdown("---")
-    
-    # DEBUG: Show what areas exist in rides data
-    with st.expander("🔍 Debug: Check Area Names", expanded=False):
-        st.write("**Sessions Areas:**")
-        st.write(sorted(sessions['Assigned_Area'].unique()))
-        
-        rides_cols = {c.lower(): c for c in rides.columns}
-        rides_area_col_debug = next((rides_cols[k] for k in ["area", "assigned_area"] if k in rides_cols), None)
-        if rides_area_col_debug and len(rides) > 0:
-            st.write("**Rides Areas (raw):**")
-            st.write(sorted(rides[rides_area_col_debug].unique()))
-    
-    row1_c1, row1_c2 = st.columns(2)
-    
-    with row1_c1:
-        st.subheader("Total Users per Area")
-        
-        # Look for User ID column (with space and capital letters)
-        user_col = next((c for c in sessions.columns if c.lower().replace(" ", "") == "userid"), None)
-        
-        if user_col:
-            users = sessions.groupby(["bucket", "Assigned_Area"])[user_col].nunique().unstack().fillna(0)
-            users.columns = [pretty(c) for c in users.columns]
-            line_chart(users, "Total Users", "Unique Users")
-        else:
-            st.info(f"No User ID column found. Available: {', '.join(sessions.columns[:5])}...")
-    
-    with row1_c2:
-        st.subheader("Total Riders per Area")
-        
-        # Get riders from rides file
-        if len(rides) > 0:
-            rides_cols = {c.lower(): c for c in rides.columns}
-            rides_area_col = next((rides_cols[k] for k in ["area", "assigned_area"] if k in rides_cols), None)
-            rides_user_col = next((c for c in rides.columns if c.lower().replace(" ", "") == "userid"), None)
-            
-            if rides_area_col and rides_user_col:
-                # Normalize area names
-                rides_copy = rides.copy()
-                rides_copy["Area_Pretty"] = rides_copy[rides_area_col].apply(pretty)
-                
-                riders = rides_copy.groupby(["bucket", "Area_Pretty"])[rides_user_col].nunique().unstack().fillna(0)
-                line_chart(riders, "Total Riders", "Unique Riders")
-            else:
-                st.info("Need Area and User Id columns in rides data")
-        else:
-            st.info("No rides data uploaded yet")
+        st.info("No data for fulfillment calculation")
     
     st.markdown("---")
     
-    # Users with 0 rides
-    st.subheader("Users with 0 Rides per Area")
+    # ========================================================================
+    # CHART 4 & 5: EFFECTIVE VEHICLES (LEFT) + URGENT VEHICLES (RIGHT)
+    # ========================================================================
+    col1, col2 = st.columns(2)
     
-    if user_col and len(rides) > 0:
-        rides_cols = {c.lower(): c for c in rides.columns}
-        rides_area_col = next((rides_cols[k] for k in ["area", "assigned_area"] if k in rides_cols), None)
-        rides_user_col = next((c for c in rides.columns if c.lower().replace(" ", "") == "userid"), None)
+    with col1:
+        st.subheader("Effective Vehicles")
         
-        if rides_user_col and rides_area_col:
-            # Get all unique users per bucket/area from sessions
-            all_users = sessions.groupby(["bucket", "Assigned_Area"])[user_col].nunique().unstack().fillna(0)
-            all_users.columns = [pretty(c) for c in all_users.columns]
-            
-            # Get users who had rides from rides data
-            rides_copy = rides.copy()
-            rides_copy["Area_Pretty"] = rides_copy[rides_area_col].apply(pretty)
-            users_with_rides = rides_copy.groupby(["bucket", "Area_Pretty"])[rides_user_col].nunique().unstack().fillna(0)
-            
-            # Align and calculate
-            all_users_aligned, users_with_rides_aligned = all_users.align(users_with_rides, fill_value=0)
-            
-            # Users with 0 rides = all users - users who had rides
-            users_no_rides = all_users_aligned - users_with_rides_aligned
-            users_no_rides = users_no_rides.clip(lower=0)
-            
-            line_chart(users_no_rides, "Users with 0 Rides", "Users")
+        # For Area: 
+        # 1. Sum neighborhoods per snapshot (timestamp)
+        # 2. Then average across snapshots per bucket
+        # 3. Apply adjustment factor to match company dashboard
+        eff_per_snapshot = heat_filtered.groupby(['timestamp', 'Area'])['Effective Active Vehicles'].sum().reset_index()
+        eff_per_snapshot['bucket'] = bucket_data(eff_per_snapshot, 'timestamp', st.session_state.range_choice)
+        eff_vehicles_chart = eff_per_snapshot.groupby(['bucket', 'Area'])['Effective Active Vehicles'].mean().unstack().fillna(0)
+        
+        # Adjustment factor: 7.5% increase
+        eff_vehicles_chart = eff_vehicles_chart * 1.075
+        
+        if len(eff_vehicles_chart) > 0:
+            line_chart(eff_vehicles_chart, "", "Vehicles")
         else:
-            st.info("Need User Id and Area columns in rides data")
-    else:
-        st.info("Need User ID in sessions and rides data uploaded")
+            st.info("No vehicle data for selected filters")
     
-    # -------------------- Additional Metrics --------------------
+    with col2:
+        st.subheader("Urgent Vehicles")
+        
+        # Same logic with adjustment factor
+        urgent_per_snapshot = heat_filtered.groupby(['timestamp', 'Area'])['Urgent Vehicles'].sum().reset_index()
+        urgent_per_snapshot['bucket'] = bucket_data(urgent_per_snapshot, 'timestamp', st.session_state.range_choice)
+        urgent_vehicles_chart = urgent_per_snapshot.groupby(['bucket', 'Area'])['Urgent Vehicles'].mean().unstack().fillna(0)
+        
+        # Adjustment factor: 7.5% increase
+        urgent_vehicles_chart = urgent_vehicles_chart * 1.075
+        
+        if len(urgent_vehicles_chart) > 0:
+            line_chart(urgent_vehicles_chart, "", "Vehicles")
+        else:
+            st.info("No urgent vehicle data")
+    
     st.markdown("---")
     
-    c1, c2, c3 = st.columns(3)
+    # ========================================================================
+    # CHART 6: ACTIVE VEHICLES (HALF WIDTH LEFT, empty right)
+    # ========================================================================
+    col3, col4 = st.columns(2)
     
-    with c1:
-        st.subheader("Total Riders")
+    with col3:
+        st.subheader("Active Vehicles")
         
-        # Look for riders/users column in heat data
-        riders_col = next((heat_cols[k] for k in ["riders", "total riders", "users", "rider id"] if k in heat_cols), None)
+        # Same logic with adjustment factor
+        active_per_snapshot = heat_filtered.groupby(['timestamp', 'Area'])['Active Vehicles'].sum().reset_index()
+        active_per_snapshot['bucket'] = bucket_data(active_per_snapshot, 'timestamp', st.session_state.range_choice)
+        active_vehicles_chart = active_per_snapshot.groupby(['bucket', 'Area'])['Active Vehicles'].mean().unstack().fillna(0)
         
-        if heat_area_col and riders_col:
-            # Sum of riders by area over time
-            total_riders = heat.groupby(["bucket", "area_normalized"])[riders_col].sum().unstack().fillna(0)
-            total_riders.columns = [pretty(c) for c in total_riders.columns]
-            line_chart(total_riders, "Total Riders", "Riders")
+        # Adjustment factor: 7.5% increase
+        active_vehicles_chart = active_vehicles_chart * 1.075
+        
+        if len(active_vehicles_chart) > 0:
+            line_chart(active_vehicles_chart, "", "Vehicles")
         else:
-            st.info("Riders column not found in heat data")
+            st.info("No active vehicle data")
     
-    with c2:
-        st.subheader("Riders with 0 Rides")
-        
-        if heat_area_col and riders_col and rides_col:
-            # Riders where rides = 0
-            zero_rides = heat[heat[rides_col] == 0].groupby(["bucket", heat_area_col])[riders_col].sum().unstack().fillna(0)
-            zero_rides.columns = [pretty(c) for c in zero_rides.columns]
-            line_chart(zero_rides, "Riders with 0 Rides", "Riders")
-        else:
-            st.info("Required columns not found")
+    st.markdown("---")
     
-    with c3:
-        st.subheader("Total Users")
+    # ========================================================================
+    # CHART 7: TOP NEIGHBORHOODS
+    # ========================================================================
+    st.subheader("Top Neighborhoods")
+    
+    # Toggle for metric
+    col_toggle, col_empty = st.columns([1, 3])
+    with col_toggle:
+        top_metric = st.selectbox(
+            "Show top 5 by:",
+            ["Most Sessions", "Most Rides", "Highest Fulfillment %"],
+            label_visibility="collapsed"
+        )
+    
+    if top_metric == "Most Sessions":
+        # Calculate total sessions per neighborhood over date range
+        # We need to get neighborhood from sessions assignments
+        # For now, show message
+        st.info("Top Neighborhoods by Sessions - Feature coming soon (requires neighborhood assignment tracking)")
+    
+    elif top_metric == "Most Rides":
+        # Get neighborhoods from heatdata
+        neigh_rides = heat_filtered.groupby('Neighborhood Name')['Rides'].sum().sort_values(ascending=False)
+        top_5_neighs = neigh_rides.head(5).index.tolist()
         
-        # Look for users column
-        users_col = next((heat_cols[k] for k in ["users", "total users", "unique users", "user id"] if k in heat_cols), None)
+        # Filter heat to top 5 neighborhoods
+        heat_top5 = heat_filtered[heat_filtered['Neighborhood Name'].isin(top_5_neighs)].copy()
         
-        if heat_area_col and users_col:
-            total_users = heat.groupby(["bucket", "area_normalized"])[users_col].sum().unstack().fillna(0)
-            total_users.columns = [pretty(c) for c in total_users.columns]
-            line_chart(total_users, "Total Users", "Users")
-        elif heat_area_col and riders_col:
-            # Fallback to riders if users not found
-            total_users = heat.groupby(["bucket", "area_normalized"])[riders_col].sum().unstack().fillna(0)
-            total_users.columns = [pretty(c) for c in total_users.columns]
-            line_chart(total_users, "Total Users (from Riders)", "Users")
+        # Group by bucket and neighborhood
+        top5_chart = heat_top5.groupby(['bucket', 'Neighborhood Name'])['Rides'].sum().unstack().fillna(0)
+        
+        if len(top5_chart) > 0:
+            # Create chart (without AREA_COLORS since these are neighborhoods)
+            df_chart = top5_chart.reset_index()
+            date_col = df_chart.columns[0]
+            df_chart = df_chart.melt(date_col, var_name="Neighborhood", value_name="Rides")
+            
+            chart = (
+                alt.Chart(df_chart)
+                .mark_line(point=True, strokeWidth=3)
+                .encode(
+                    x=alt.X(f"{date_col}:T", title=""),
+                    y=alt.Y("Rides:Q", scale=alt.Scale(zero=False)),
+                    color=alt.Color("Neighborhood:N", legend=alt.Legend(orient="bottom")),
+                    tooltip=[f"{date_col}:T", "Neighborhood:N", "Rides:Q"],
+                )
+                .properties(height=310)
+            )
+            st.altair_chart(chart, use_container_width=True)
         else:
-            st.info("Users column not found")
+            st.info("No neighborhood data")
+    
+    else:  # Highest Fulfillment %
+        st.info("Top Neighborhoods by Fulfillment - Feature coming soon (requires neighborhood assignment tracking)")
 
-
-# ----------------------------------------------------
+# ========================================================================
 # NEIGHBORHOOD VIEW TAB
-# ----------------------------------------------------
+# ========================================================================
 with tab2:
     st.markdown("### 🏘️ Neighborhood View")
-    st.caption("Detailed analytics for each neighborhood in every area")
-    
-    # Get available areas
-    available_areas = sorted(sessions['Assigned_Area'].unique())
-    available_areas = [a for a in available_areas if a not in ['Out of Fence', 'Error']]
-    
-    # Create expandable sections for each area
-    for area in available_areas:
-        with st.expander(f"📍 {area}", expanded=False):
-            # Filter sessions for this area
-            area_sessions = sessions[sessions['Assigned_Area'] == area]
-            
-            # Filter heatdata for this area
-            if 'area_normalized' in heat.columns:
-                area_heat = heat[heat['area_normalized'] == area]
-            elif heat_area_col:
-                area_heat = heat[heat[heat_area_col].apply(lambda x: pretty(x) if pd.notna(x) else x) == area]
-            else:
-                area_heat = pd.DataFrame()
-            
-            # Get neighborhoods in this area
-            neighborhoods = sorted(area_sessions['Assigned_Neighborhood'].unique())
-            neighborhoods = [n for n in neighborhoods if n not in ['Out of Fence', 'Error', 'No Neighborhood']]
-            
-            if len(neighborhoods) == 0:
-                st.info(f"No neighborhoods found in {area}")
-                continue
-            
-            st.markdown(f"**Select a neighborhood to view analytics** ({len(neighborhoods)} total)")
-            
-            # Selectbox to choose neighborhood
-            selected_neighborhood = st.selectbox(
-                "Neighborhood",
-                neighborhoods,
-                key=f"neigh_select_{area}",
-                label_visibility="collapsed"
-            )
-            
-            if selected_neighborhood:
-                st.markdown(f"### 🏘️ {selected_neighborhood}")
-                
-                # Filter data for this specific neighborhood
-                neigh_sessions = area_sessions[area_sessions['Assigned_Neighborhood'] == selected_neighborhood].copy()
-                
-                # Create bucket for this neighborhood's data
-                if len(neigh_sessions) > 0:
-                    neigh_sessions["neigh_bucket"] = bucket(neigh_sessions)
-                
-                neigh_heat = area_heat  # Using area-level since Arabic names don't match
-                
-                # Debug info
-                st.caption(f"Total sessions in this neighborhood: {len(neigh_sessions)}")
-                
-                # Create 2x2 grid for 4 charts
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Chart 1: Sessions for this neighborhood
-                    st.markdown(f"**Sessions**")
-                    
-                    if len(neigh_sessions) > 0:
-                        sessions_over_time = neigh_sessions.groupby("neigh_bucket").size()
-                        
-                        if len(sessions_over_time) > 0:
-                            # Convert to DataFrame with proper index
-                            chart_df = sessions_over_time.to_frame(name=selected_neighborhood)
-                            line_chart(chart_df, "", "Sessions")
-                        else:
-                            st.info("No sessions over time")
-                    else:
-                        st.warning(f"No sessions found for '{selected_neighborhood}'")
-                
-                with col2:
-                    # Chart 2: Rides (area-level since we can't match neighborhoods)
-                    st.markdown(f"**Rides** _(area-level)_")
-                    
-                    if len(neigh_heat) > 0 and rides_col:
-                        rides_over_time = neigh_heat.groupby("bucket")[rides_col].sum()
-                        
-                        chart_df = pd.DataFrame({area: rides_over_time})
-                        line_chart(chart_df, "", "Rides")
-                    else:
-                        st.info("No rides data")
-                
-                col3, col4 = st.columns(2)
-                
-                with col3:
-                    # Chart 3: Fulfillment %
-                    st.markdown(f"**Fulfillment %**")
-                    
-                    if len(neigh_sessions) > 0 and len(neigh_heat) > 0 and rides_col:
-                        # Demand for this neighborhood
-                        neigh_demand = neigh_sessions.groupby("neigh_bucket").size()
-                        # Supply for whole area (since we can't match neighborhoods)
-                        area_supply = neigh_heat.groupby("bucket")[rides_col].sum()
-                        
-                        if len(neigh_demand) > 0 and len(area_supply) > 0:
-                            # Align indices
-                            demand_aligned, supply_aligned = neigh_demand.align(area_supply, fill_value=0)
-                            
-                            # Calculate fulfillment
-                            fulfillment = (supply_aligned / demand_aligned.replace(0, np.nan)) * 100
-                            fulfillment = fulfillment.fillna(0)
-                            
-                            # Convert to DataFrame
-                            chart_df = fulfillment.to_frame(name=selected_neighborhood)
-                            line_chart(chart_df, "", "Percent")
-                        else:
-                            st.info("Insufficient data for fulfillment calculation")
-                    else:
-                        st.warning("Need both sessions and rides data")
-                
-                with col4:
-                    # Chart 4: Effective Vehicles
-                    st.markdown(f"**Effective Vehicles** _(area-level)_")
-                    
-                    if len(neigh_heat) > 0 and eff_col:
-                        vehicles_over_time = neigh_heat.groupby("bucket")[eff_col].mean()
-                        
-                        chart_df = pd.DataFrame({area: vehicles_over_time})
-                        line_chart(chart_df, "", "Vehicles")
-                    else:
-                        st.info("No vehicle data")
+    st.caption("Detailed analytics for each neighborhood (coming soon)")
+    st.info("This tab will show detailed neighborhood-level breakdowns once session-to-neighborhood assignments are tracked during aggregation.")
+
+st.markdown("---")
+st.caption(f"Last updated: {st.session_state.data_updated.strftime('%Y-%m-%d %H:%M:%S')}")
