@@ -353,15 +353,21 @@ if st.session_state.distribution_points:
     
     # Show count per area
     points_df = pd.DataFrame(st.session_state.distribution_points)
-    area_counts = points_df.groupby('area').size()
     
-    with st.sidebar.expander("📋 View Points by Area", expanded=False):
-        for area in AREA_NAMES:
-            count = area_counts.get(area, 0)
-            st.write(f"**{area}:** {count} points")
+    # Check if 'area' column exists, otherwise skip the count
+    if 'area' in points_df.columns:
+        area_counts = points_df.groupby('area').size()
         
-        st.markdown("---")
-        st.dataframe(points_df, use_container_width=True, hide_index=True)
+        with st.sidebar.expander("📋 View Points by Area", expanded=False):
+            for area in AREA_NAMES:
+                count = area_counts.get(area, 0)
+                st.write(f"**{area}:** {count} points")
+            
+            st.markdown("---")
+            st.dataframe(points_df, use_container_width=True, hide_index=True)
+    else:
+        with st.sidebar.expander("📋 View Points", expanded=False):
+            st.dataframe(points_df, use_container_width=True, hide_index=True)
     
     if st.sidebar.button("🗑️ Clear All Points"):
         st.session_state.distribution_points = []
