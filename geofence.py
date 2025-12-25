@@ -256,27 +256,45 @@ with st.sidebar:
                 with st.spinner("Processing..."):
                     # Load and combine sessions files
                     sessions_list = []
-                    for sfile in sfiles:
+                    for i, sfile in enumerate(sfiles, 1):
                         df = pd.read_csv(sfile) if sfile.name.endswith(".csv") else pd.read_excel(sfile)
                         sessions_list.append(df)
+                        st.toast(f"📄 Sessions file {i}/{len(sfiles)}: {sfile.name} - {len(df):,} rows")
                     sessions = pd.concat(sessions_list, ignore_index=True)
-                    st.toast(f"✅ Loaded {len(sfiles)} sessions file(s) - {len(sessions):,} total rows")
+                    st.toast(f"✅ Combined {len(sfiles)} sessions file(s) - {len(sessions):,} total rows")
+                    
+                    # Remove any existing assignment columns to force re-assignment
+                    for col in ['Assigned_Area', 'Assigned_Neighborhood', 'Within_Fence']:
+                        if col in sessions.columns:
+                            sessions = sessions.drop(columns=[col])
                     
                     # Load and combine heat files
                     heat_list = []
-                    for hfile in hfiles:
+                    for i, hfile in enumerate(hfiles, 1):
                         df = pd.read_csv(hfile) if hfile.name.endswith(".csv") else pd.read_excel(hfile)
                         heat_list.append(df)
+                        st.toast(f"📄 Heat file {i}/{len(hfiles)}: {hfile.name} - {len(df):,} rows, columns: {len(df.columns)}")
+                    
+                    # Check if all heat files have same columns
+                    if len(heat_list) > 1:
+                        first_cols = set(heat_list[0].columns)
+                        for i, df in enumerate(heat_list[1:], 2):
+                            if set(df.columns) != first_cols:
+                                missing = first_cols - set(df.columns)
+                                extra = set(df.columns) - first_cols
+                                st.warning(f"⚠️ Heat file {i} has different columns! Missing: {missing}, Extra: {extra}")
+                    
                     heat = pd.concat(heat_list, ignore_index=True)
-                    st.toast(f"✅ Loaded {len(hfiles)} heat file(s) - {len(heat):,} total rows")
+                    st.toast(f"✅ Combined {len(hfiles)} heat file(s) - {len(heat):,} total rows")
                     
                     # Load and combine rides files
                     rides_list = []
-                    for rfile in rfiles:
+                    for i, rfile in enumerate(rfiles, 1):
                         df = pd.read_csv(rfile) if rfile.name.endswith(".csv") else pd.read_excel(rfile)
                         rides_list.append(df)
+                        st.toast(f"📄 Rides file {i}/{len(rfiles)}: {rfile.name} - {len(df):,} rows")
                     rides = pd.concat(rides_list, ignore_index=True)
-                    st.toast(f"✅ Loaded {len(rfiles)} rides file(s) - {len(rides):,} total rows")
+                    st.toast(f"✅ Combined {len(rfiles)} rides file(s) - {len(rides):,} total rows")
                     
                     # Assign sessions to areas using KDTree
                     from scipy.spatial import cKDTree
@@ -324,6 +342,10 @@ with st.sidebar:
                     sessions['Assigned_Area'] = np.where(within_threshold, all_points['area'].iloc[nearest_indices].values, 'Out of Fence')
                     sessions['Assigned_Neighborhood'] = np.where(within_threshold, all_points['neighborhood'].iloc[nearest_indices].values, 'Out of Fence')
                     sessions['Within_Fence'] = np.where(within_threshold, 'Yes', 'No')
+                    
+                    # Show assignment summary
+                    area_counts = sessions['Assigned_Area'].value_counts()
+                    st.toast(f"📍 Areas found: {', '.join([f'{area} ({count:,})' for area, count in area_counts.items() if area != 'Out of Fence'])}")
                     
                     # Extract timestamps
                     for df in (sessions, heat, rides):
@@ -398,9 +420,12 @@ heat_cols = {c.lower(): c for c in heat.columns}
 heat_area_col = next((heat_cols[k] for k in ["assigned_area", "area"] if k in heat_cols), None)
 
 if heat_area_col and len(selected) > 0:
-    # Normalize heat area names and filter
+    # Normalize heat area names
     heat['area_normalized'] = heat[heat_area_col].apply(lambda x: pretty(x) if pd.notna(x) else x)
-    heat = heat[heat['area_normalized'].isin(selected)]
+    # Normalize selected values too to ensure matching
+    selected_normalized = [pretty(s) for s in selected]
+    # Filter using normalized names
+    heat = heat[heat['area_normalized'].isin(selected_normalized)]
 
 # Normalize rides area names to match selected areas
 rides_cols = {c.lower(): c for c in rides.columns}
@@ -520,7 +545,7 @@ with tab1:
         st.subheader("Rides")
 
         if heat_area_col:
-            rides = heat.groupby(["bucket", heat_area_col]).size().unstack().fillna(0)
+            rides = heat.groupby(["bucket", "area_normalized"]).size().unstack().fillna(0)
             rides.columns = [pretty(c) for c in rides.columns]
             line_chart(rides, "Rides", "Rides")
         else:
@@ -531,7 +556,7 @@ with tab1:
 
         if heat_area_col and eff_col:
             eff = (
-                heat.groupby(["bucket", heat_area_col])[eff_col]
+                heat.groupby(["bucket", "area_normalized"])[eff_col]
                 .mean()
                 .unstack()
                 .fillna(0)
@@ -546,7 +571,7 @@ with tab1:
     st.subheader("Fulfillment %")
 
     if heat_area_col:
-        rides = heat.groupby(["bucket", heat_area_col]).size().unstack().fillna(0)
+        rides = heat.groupby(["bucket", "area_normalized"]).size().unstack().fillna(0)
         rides.columns = [pretty(c) for c in rides.columns]
 
         sess = sessions.groupby(["bucket", "Assigned_Area"]).size().unstack().fillna(0)
@@ -657,7 +682,7 @@ with tab1:
         
         if heat_area_col and riders_col:
             # Sum of riders by area over time
-            total_riders = heat.groupby(["bucket", heat_area_col])[riders_col].sum().unstack().fillna(0)
+            total_riders = heat.groupby(["bucket", "area_normalized"])[riders_col].sum().unstack().fillna(0)
             total_riders.columns = [pretty(c) for c in total_riders.columns]
             line_chart(total_riders, "Total Riders", "Riders")
         else:
@@ -681,12 +706,12 @@ with tab1:
         users_col = next((heat_cols[k] for k in ["users", "total users", "unique users", "user id"] if k in heat_cols), None)
         
         if heat_area_col and users_col:
-            total_users = heat.groupby(["bucket", heat_area_col])[users_col].sum().unstack().fillna(0)
+            total_users = heat.groupby(["bucket", "area_normalized"])[users_col].sum().unstack().fillna(0)
             total_users.columns = [pretty(c) for c in total_users.columns]
             line_chart(total_users, "Total Users", "Users")
         elif heat_area_col and riders_col:
             # Fallback to riders if users not found
-            total_users = heat.groupby(["bucket", heat_area_col])[riders_col].sum().unstack().fillna(0)
+            total_users = heat.groupby(["bucket", "area_normalized"])[riders_col].sum().unstack().fillna(0)
             total_users.columns = [pretty(c) for c in total_users.columns]
             line_chart(total_users, "Total Users (from Riders)", "Users")
         else:
