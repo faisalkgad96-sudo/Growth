@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pathlib import Path
 from scipy.spatial import cKDTree
 import pickle
@@ -1142,6 +1144,150 @@ with tab1:
     
     st.markdown("")  # Spacing
     
+    # Comprehensive Sessions Breakdown Chart
+    st.markdown("### 📊 Sessions Performance: Demand, Fulfillment & Missed Opportunity")
+    
+    # Calculate data for the breakdown
+    sessions_breakdown = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
+    rides_breakdown = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
+    
+    # Align data
+    sessions_aligned_bd, rides_aligned_bd = sessions_breakdown.align(rides_breakdown, fill_value=0)
+    missed_bd = (sessions_aligned_bd - rides_aligned_bd).clip(lower=0)
+    fulfillment_bd = (rides_aligned_bd / sessions_aligned_bd.replace(0, np.nan) * 100).fillna(0)
+    
+    if len(sessions_aligned_bd) > 0:
+        # Show comprehensive chart for each area
+        for area in selected_areas:
+            if area not in sessions_aligned_bd.columns:
+                continue
+                
+            st.markdown(f"#### 📍 {area}")
+            
+            # Prepare data
+            breakdown_df = pd.DataFrame({
+                'Date': sessions_aligned_bd.index,
+                'Total Sessions': sessions_aligned_bd[area],
+                'Fulfilled (Rides)': rides_aligned_bd[area] if area in rides_aligned_bd.columns else 0,
+                'Missed Opportunity': missed_bd[area] if area in missed_bd.columns else 0,
+                'Fulfillment %': fulfillment_bd[area] if area in fulfillment_bd.columns else 0
+            })
+            
+            # Create dual-axis chart with plotly
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            # Add stacked bars
+            fig.add_trace(
+                go.Bar(
+                    x=breakdown_df['Date'],
+                    y=breakdown_df['Fulfilled (Rides)'],
+                    name='Fulfilled (Rides)',
+                    marker_color='#20BF55',
+                    hovertemplate='<b>Fulfilled</b><br>%{y:,.0f} rides<br>%{x|%b %d, %Y}<extra></extra>'
+                ),
+                secondary_y=False
+            )
+            
+            fig.add_trace(
+                go.Bar(
+                    x=breakdown_df['Date'],
+                    y=breakdown_df['Missed Opportunity'],
+                    name='Missed Opportunity',
+                    marker_color='#FF6B6B',
+                    hovertemplate='<b>Missed</b><br>%{y:,.0f} sessions<br>%{x|%b %d, %Y}<extra></extra>'
+                ),
+                secondary_y=False
+            )
+            
+            # Add fulfillment % line
+            fig.add_trace(
+                go.Scatter(
+                    x=breakdown_df['Date'],
+                    y=breakdown_df['Fulfillment %'],
+                    name='Fulfillment %',
+                    mode='lines+markers',
+                    line=dict(color='#FFC107', width=3),
+                    marker=dict(size=8, color='#FFC107'),
+                    yaxis='y2',
+                    hovertemplate='<b>Fulfillment</b><br>%{y:.1f}%<br>%{x|%b %d, %Y}<extra></extra>'
+                ),
+                secondary_y=True
+            )
+            
+            # Update layout
+            fig.update_layout(
+                barmode='stack',
+                hovermode='x unified',
+                height=400,
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                ),
+                margin=dict(l=0, r=0, t=30, b=0)
+            )
+            
+            # Update axes
+            fig.update_xaxes(title_text="")
+            fig.update_yaxes(title_text="Sessions Count", secondary_y=False)
+            fig.update_yaxes(title_text="Fulfillment %", range=[0, 100], secondary_y=True)
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add insight cards below chart
+            col1, col2, col3, col4 = st.columns(4)
+            
+            total_sessions = breakdown_df['Total Sessions'].sum()
+            total_fulfilled = breakdown_df['Fulfilled (Rides)'].sum()
+            total_missed = breakdown_df['Missed Opportunity'].sum()
+            avg_fulfillment = breakdown_df['Fulfillment %'].mean()
+            
+            with col1:
+                st.metric("📊 Total Demand", f"{total_sessions:,.0f}", 
+                         help="Total sessions requested")
+            with col2:
+                st.metric("✅ Fulfilled", f"{total_fulfilled:,.0f}", 
+                         delta=f"{(total_fulfilled/total_sessions*100 if total_sessions > 0 else 0):.1f}%",
+                         help="Sessions that got rides")
+            with col3:
+                st.metric("❌ Missed", f"{total_missed:,.0f}", 
+                         delta=f"-{(total_missed/total_sessions*100 if total_sessions > 0 else 0):.1f}%",
+                         delta_color="inverse",
+                         help="Sessions without rides")
+            with col4:
+                fulfillment_color = "normal" if avg_fulfillment >= FULFILLMENT_TARGET else "inverse"
+                st.metric("📈 Avg Fulfillment", f"{avg_fulfillment:.1f}%",
+                         delta=f"{avg_fulfillment - FULFILLMENT_TARGET:.1f}% vs target",
+                         delta_color=fulfillment_color,
+                         help=f"Target: {FULFILLMENT_TARGET}%")
+            
+            st.markdown("---")
+    else:
+        st.info("No data available for performance breakdown")
+    
+    st.markdown("")  # Spacing
+    
+    # Missed Opportunity Chart
+    st.markdown("### Missed Opportunity (Unfulfilled Sessions)")
+    
+    sessions_for_missed = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
+    rides_for_missed = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
+    
+    sessions_aligned_missed, rides_aligned_missed = sessions_for_missed.align(rides_for_missed, fill_value=0)
+    missed_opportunity_chart = sessions_aligned_missed - rides_aligned_missed
+    missed_opportunity_chart = missed_opportunity_chart.clip(lower=0)  # Ensure no negative values
+    
+    if len(missed_opportunity_chart) > 0:
+        line_chart(missed_opportunity_chart, "", "Missed Sessions", show_values=st.session_state.show_chart_values)
+        show_data_table(missed_opportunity_chart, "Missed Opportunity Data")
+    else:
+        st.info("No data for missed opportunity calculation")
+    
+    st.markdown("")  # Spacing
+    
     # Vehicle Charts in 2 columns
     col1, col2 = st.columns(2)
     
@@ -1342,6 +1488,85 @@ with tab2:
                             # Prepare data for charts
                             neigh_heat['bucket'] = bucket_data(neigh_heat, 'timestamp', st.session_state.range_choice)
                             
+                            # COMPREHENSIVE PERFORMANCE CHART (if sessions available)
+                            if has_neighborhood_sessions and neigh_total_sessions > 0:
+                                st.markdown("**📊 Performance Overview: Demand, Fulfillment & Missed Opportunity**")
+                                
+                                # Prepare comprehensive data
+                                sessions_by_date = neigh_sessions_data.groupby('date')['sessions_count'].sum()
+                                rides_by_date = neigh_heat.groupby('bucket')['Rides'].sum()
+                                
+                                perf_df = pd.DataFrame({
+                                    'Date': sessions_by_date.index,
+                                    'Sessions': sessions_by_date.values
+                                })
+                                rides_df_temp = pd.DataFrame({
+                                    'Date': rides_by_date.index,
+                                    'Rides': rides_by_date.values
+                                })
+                                
+                                perf_df = perf_df.merge(rides_df_temp, on='Date', how='outer').fillna(0)
+                                perf_df['Missed'] = (perf_df['Sessions'] - perf_df['Rides']).clip(lower=0)
+                                perf_df['Fulfillment %'] = (perf_df['Rides'] / perf_df['Sessions'] * 100).replace([float('inf'), -float('inf')], 0).fillna(0)
+                                
+                                if len(perf_df) > 0:
+                                    fig_perf = make_subplots(specs=[[{"secondary_y": True}]])
+                                    
+                                    # Stacked bars
+                                    fig_perf.add_trace(
+                                        go.Bar(
+                                            x=perf_df['Date'],
+                                            y=perf_df['Rides'],
+                                            name='Fulfilled',
+                                            marker_color='#20BF55',
+                                            hovertemplate='<b>Fulfilled</b><br>%{y:,.0f}<br>%{x|%b %d}<extra></extra>'
+                                        ),
+                                        secondary_y=False
+                                    )
+                                    
+                                    fig_perf.add_trace(
+                                        go.Bar(
+                                            x=perf_df['Date'],
+                                            y=perf_df['Missed'],
+                                            name='Missed',
+                                            marker_color='#FF6B6B',
+                                            hovertemplate='<b>Missed</b><br>%{y:,.0f}<br>%{x|%b %d}<extra></extra>'
+                                        ),
+                                        secondary_y=False
+                                    )
+                                    
+                                    # Fulfillment line
+                                    fig_perf.add_trace(
+                                        go.Scatter(
+                                            x=perf_df['Date'],
+                                            y=perf_df['Fulfillment %'],
+                                            name='Fulfillment %',
+                                            mode='lines+markers',
+                                            line=dict(color='#FFC107', width=2),
+                                            marker=dict(size=6),
+                                            yaxis='y2',
+                                            hovertemplate='<b>Fulfillment</b><br>%{y:.1f}%<br>%{x|%b %d}<extra></extra>'
+                                        ),
+                                        secondary_y=True
+                                    )
+                                    
+                                    fig_perf.update_layout(
+                                        barmode='stack',
+                                        hovermode='x unified',
+                                        height=300,
+                                        showlegend=True,
+                                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                        margin=dict(l=0, r=0, t=30, b=0)
+                                    )
+                                    
+                                    fig_perf.update_xaxes(title_text="")
+                                    fig_perf.update_yaxes(title_text="Count", secondary_y=False)
+                                    fig_perf.update_yaxes(title_text="Fulfillment %", range=[0, 100], secondary_y=True)
+                                    
+                                    st.plotly_chart(fig_perf, use_container_width=True)
+                                
+                                st.markdown("")  # Spacing
+                            
                             # Show different chart layouts based on data availability
                             if has_neighborhood_sessions and neigh_total_sessions > 0:
                                 # Full layout with sessions and fulfillment
@@ -1421,6 +1646,29 @@ with tab2:
                                         tooltip=[
                                             alt.Tooltip('Date:T', title='Date', format='%b %d, %Y'),
                                             alt.Tooltip('Fulfillment:Q', title='Fulfillment %', format='.1f')
+                                        ]
+                                    ).properties(height=250)
+                                    
+                                    st.altair_chart(chart, use_container_width=True)
+                                
+                                # Missed Opportunity chart
+                                st.markdown("**Missed Opportunity Over Time**")
+                                
+                                # Calculate missed opportunity (sessions - rides)
+                                missed_df = fulfillment_df.copy()
+                                missed_df['Missed'] = (missed_df['Sessions'] - missed_df['Rides']).clip(lower=0)
+                                
+                                if len(missed_df) > 0 and missed_df['Missed'].sum() > 0:
+                                    chart = alt.Chart(missed_df).mark_line(
+                                        point=alt.OverlayMarkDef(size=80, filled=True),
+                                        strokeWidth=3,
+                                        color="#FF6B6B"
+                                    ).encode(
+                                        x=alt.X('Date:T', title='', axis=alt.Axis(format='%b %d', labelAngle=-45)),
+                                        y=alt.Y('Missed:Q', title='Missed Sessions'),
+                                        tooltip=[
+                                            alt.Tooltip('Date:T', title='Date', format='%b %d, %Y'),
+                                            alt.Tooltip('Missed:Q', title='Missed Sessions', format=',.0f')
                                         ]
                                     ).properties(height=250)
                                     
