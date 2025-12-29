@@ -4,4 +4,5 @@ openpyxl>=3.1.0        # Excel file support (.xlsx)
 numpy>=1.24.0          # Numerical operations
 scipy>=1.11.0          # KDTree for spatial indexing
 altair>=5.0.0          # Interactive charts
+plotly
 xlrd>=2.0.0            # Excel file reading (.xls)
