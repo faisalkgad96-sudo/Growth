@@ -32,6 +32,7 @@ AREA_COLORS = {
     "Maadi": "#20BF55",           # Green
     "Masr El Gedida": "#EE5A6F",  # Red/Pink
     "Zahraa El Maadi": "#F79F1F",  # Orange
+    "Total": "#00D2D3",           # Cyan (for total view)
 }
 
 # Performance thresholds
@@ -1099,35 +1100,61 @@ tab1, tab2 = st.tabs(["📊 Overview", "🏘️ Neighborhood View"])
 
 with tab1:
     # Sessions Chart
-    st.markdown("### Sessions Over Time")
+    col_title, col_toggle = st.columns([5, 1])
+    with col_title:
+        st.markdown("### Sessions Over Time")
+    with col_toggle:
+        sessions_total_view = st.toggle("Total", value=False, key="sessions_total_toggle")
     
     sessions_filtered['bucket'] = bucket_data(sessions_filtered, 'date', st.session_state.range_choice)
     sessions_chart = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
     
     if len(sessions_chart) > 0:
-        line_chart(sessions_chart, "", "Sessions", show_values=st.session_state.show_chart_values)
-        show_data_table(sessions_chart, "Sessions Data")
+        if sessions_total_view:
+            # Show total (sum of all areas)
+            sessions_total = sessions_chart.sum(axis=1).to_frame(name='Total')
+            line_chart(sessions_total, "", "Sessions", show_values=st.session_state.show_chart_values)
+            show_data_table(sessions_total, "Sessions Data (Total)")
+        else:
+            # Show individual areas
+            line_chart(sessions_chart, "", "Sessions", show_values=st.session_state.show_chart_values)
+            show_data_table(sessions_chart, "Sessions Data")
     else:
         st.info("No session data for selected filters")
     
     st.markdown("")  # Spacing
     
     # Rides Chart
-    st.markdown("### Rides Over Time")
+    col_title, col_toggle = st.columns([5, 1])
+    with col_title:
+        st.markdown("### Rides Over Time")
+    with col_toggle:
+        rides_total_view = st.toggle("Total", value=False, key="rides_total_toggle")
     
     heat_filtered['bucket'] = bucket_data(heat_filtered, 'timestamp', st.session_state.range_choice)
     rides_chart = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
     
     if len(rides_chart) > 0:
-        line_chart(rides_chart, "", "Rides", show_values=st.session_state.show_chart_values)
-        show_data_table(rides_chart, "Rides Data")
+        if rides_total_view:
+            # Show total (sum of all areas)
+            rides_total = rides_chart.sum(axis=1).to_frame(name='Total')
+            line_chart(rides_total, "", "Rides", show_values=st.session_state.show_chart_values)
+            show_data_table(rides_total, "Rides Data (Total)")
+        else:
+            # Show individual areas
+            line_chart(rides_chart, "", "Rides", show_values=st.session_state.show_chart_values)
+            show_data_table(rides_chart, "Rides Data")
     else:
         st.info("No rides data for selected filters")
     
     st.markdown("")  # Spacing
     
     # Fulfillment Chart
-    st.markdown("### Fulfillment % Over Time")
+    col_title, col_toggle = st.columns([5, 1])
+    with col_title:
+        st.markdown("### Fulfillment % Over Time")
+    with col_toggle:
+        fulfillment_total_view = st.toggle("Total", value=False, key="fulfillment_total_toggle")
     
     sessions_for_fulfill = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
     rides_for_fulfill = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
@@ -1137,15 +1164,28 @@ with tab1:
     fulfillment_chart = fulfillment_chart.fillna(0)
     
     if len(fulfillment_chart) > 0:
-        line_chart(fulfillment_chart, "", "Percent", show_values=st.session_state.show_chart_values)
-        show_data_table(fulfillment_chart, "Fulfillment % Data")
+        if fulfillment_total_view:
+            # Calculate overall fulfillment % (total rides / total sessions)
+            total_sessions = sessions_aligned.sum(axis=1)
+            total_rides = rides_aligned.sum(axis=1)
+            fulfillment_total = (total_rides / total_sessions.replace(0, np.nan) * 100).fillna(0).to_frame(name='Total')
+            line_chart(fulfillment_total, "", "Percent", show_values=st.session_state.show_chart_values)
+            show_data_table(fulfillment_total, "Fulfillment % Data (Total)")
+        else:
+            # Show individual areas
+            line_chart(fulfillment_chart, "", "Percent", show_values=st.session_state.show_chart_values)
+            show_data_table(fulfillment_chart, "Fulfillment % Data")
     else:
         st.info("No data for fulfillment calculation")
     
     st.markdown("")  # Spacing
     
-    # Comprehensive Sessions Breakdown Chart
-    st.markdown("### 📊 Sessions Performance: Demand, Fulfillment & Missed Opportunity")
+    # Comprehensive Sessions Breakdown Chart with toggle
+    col_title, col_toggle = st.columns([5, 1])
+    with col_title:
+        st.markdown("### 📊 Sessions Performance: Demand, Fulfillment & Missed Opportunity")
+    with col_toggle:
+        view_mode = st.toggle("🔥 Heatmap", value=False, key="performance_heatmap_toggle")
     
     # Calculate data for the breakdown
     sessions_breakdown = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
@@ -1157,121 +1197,555 @@ with tab1:
     fulfillment_bd = (rides_aligned_bd / sessions_aligned_bd.replace(0, np.nan) * 100).fillna(0)
     
     if len(sessions_aligned_bd) > 0:
-        # Show comprehensive chart for each area
-        for area in selected_areas:
-            if area not in sessions_aligned_bd.columns:
-                continue
-                
-            st.markdown(f"#### 📍 {area}")
+        
+        if view_mode:
+            # HEATMAP VIEW - Three heatmaps stacked vertically (standardized)
             
-            # Prepare data
-            breakdown_df = pd.DataFrame({
-                'Date': sessions_aligned_bd.index,
-                'Total Sessions': sessions_aligned_bd[area],
-                'Fulfilled (Rides)': rides_aligned_bd[area] if area in rides_aligned_bd.columns else 0,
-                'Missed Opportunity': missed_bd[area] if area in missed_bd.columns else 0,
-                'Fulfillment %': fulfillment_bd[area] if area in fulfillment_bd.columns else 0
-            })
+            # Prepare combined data for all areas
+            sessions_data = sessions_breakdown.T  # Transpose so areas are rows, dates are columns
+            rides_data = rides_breakdown.T
+            missed_data = missed_bd.T
+            fulfillment_data = fulfillment_bd.T
             
-            # Create dual-axis chart with plotly
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            # Calculate vehicle metrics per area per date
+            vehicle_metrics = {}
+            for area in selected_areas:
+                area_heat = heat_filtered[heat_filtered['Area'] == area].copy()
+                if len(area_heat) > 0:
+                    area_heat['bucket'] = bucket_data(area_heat, 'timestamp', st.session_state.range_choice)
+                    
+                    # Group by bucket and calculate averages
+                    active_by_date = area_heat.groupby('bucket')['Active Vehicles'].mean() * 1.075
+                    urgent_by_date = area_heat.groupby('bucket')['Urgent Vehicles'].mean() * 1.075
+                    effective_by_date = area_heat.groupby('bucket')['Effective Active Vehicles'].mean() * 1.075
+                    
+                    vehicle_metrics[area] = {
+                        'active': active_by_date,
+                        'urgent': urgent_by_date,
+                        'effective': effective_by_date
+                    }
             
-            # Add stacked bars
-            fig.add_trace(
-                go.Bar(
-                    x=breakdown_df['Date'],
-                    y=breakdown_df['Fulfilled (Rides)'],
-                    name='Fulfilled (Rides)',
-                    marker_color='#20BF55',
-                    hovertemplate='<b>Fulfilled</b><br>%{y:,.0f} rides<br>%{x|%b %d, %Y}<extra></extra>'
+            # Standard height for all heatmaps
+            standard_height = max(200, len(selected_areas) * 60)
+            
+            # ===== HEATMAP 1: SESSIONS (TOTAL DEMAND) =====
+            st.markdown("#### 📊 Sessions (Total Demand)")
+            st.caption("Total session requests per area and date (colors normalized per area)")
+            
+            # Normalize sessions per area
+            sessions_normalized = sessions_data.copy()
+            for idx in range(len(sessions_normalized)):
+                row = sessions_normalized.iloc[idx]
+                row_min = row.min()
+                row_max = row.max()
+                if row_max > row_min:
+                    sessions_normalized.iloc[idx] = (row - row_min) / (row_max - row_min)
+                else:
+                    sessions_normalized.iloc[idx] = 0
+            
+            # Build hover text and display text for sessions
+            hover_sessions = []
+            display_sessions = []
+            for area_idx, area in enumerate(sessions_data.index):
+                row_hover = []
+                row_display = []
+                for date_idx, date in enumerate(sessions_data.columns):
+                    sessions = sessions_data.iloc[area_idx, date_idx]
+                    rides = rides_data.iloc[area_idx, date_idx] if area in rides_data.index else 0
+                    missed = missed_data.iloc[area_idx, date_idx] if area in missed_data.index else 0
+                    fulfillment = fulfillment_data.iloc[area_idx, date_idx] if area in fulfillment_data.index else 0
+                    
+                    active = 0
+                    urgent = 0
+                    effective = 0
+                    if area in vehicle_metrics and date in vehicle_metrics[area]['active'].index:
+                        active = vehicle_metrics[area]['active'][date]
+                        urgent = vehicle_metrics[area]['urgent'][date]
+                        effective = vehicle_metrics[area]['effective'][date]
+                    
+                    hover_text = (
+                        f"<b>{area}</b><br>"
+                        f"{date.strftime('%b %d, %Y')}<br>"
+                        f"<br>"
+                        f"<b>Demand & Performance:</b><br>"
+                        f"Sessions: {sessions:,.0f}<br>"
+                        f"Rides: {rides:,.0f}<br>"
+                        f"Missed: {missed:,.0f}<br>"
+                        f"Fulfillment: {fulfillment:.1f}%<br>"
+                        f"<br>"
+                        f"<b>Fleet Metrics:</b><br>"
+                        f"Active Scooters: {active:.0f}<br>"
+                        f"Urgent Scooters: {urgent:.0f}<br>"
+                        f"Effective Active: {effective:.0f}"
+                    )
+                    row_hover.append(hover_text)
+                    
+                    # Format display text
+                    if sessions >= 1000:
+                        display_text = f"{sessions/1000:.1f}k"
+                    else:
+                        display_text = f"{sessions:.0f}"
+                    row_display.append(display_text)
+                    
+                hover_sessions.append(row_hover)
+                display_sessions.append(row_display)
+            
+            fig_sessions = go.Figure(data=go.Heatmap(
+                z=sessions_normalized.values,
+                x=sessions_data.columns.strftime('%b %d'),
+                y=sessions_data.index,
+                text=display_sessions,  # Formatted display text
+                texttemplate='%{text}',
+                textfont=dict(size=12, family='Arial Black'),
+                hovertext=hover_sessions,
+                hovertemplate='%{hovertext}<extra></extra>',
+                colorscale=[
+                    [0, '#E8F5E9'],      # Very light green
+                    [0.25, '#81C784'],   # Light green
+                    [0.5, '#4CAF50'],    # Green
+                    [0.75, '#388E3C'],   # Dark green
+                    [1, '#1B5E20']       # Very dark green
+                ],
+                colorbar=dict(
+                    title="Relative<br>Demand",
+                    thickness=20,
+                    len=0.7,
+                    tickvals=[0, 0.5, 1],
+                    ticktext=['Low', 'Med', 'High']
                 ),
-                secondary_y=False
+                showscale=True,
+                zmin=0,
+                zmax=1
+            ))
+            
+            fig_sessions.update_layout(
+                height=standard_height,
+                xaxis_title="Date",
+                yaxis_title="Area",
+                xaxis=dict(tickangle=-45, side='bottom'),
+                margin=dict(l=0, r=0, t=10, b=50),
+                autosize=True
             )
             
-            fig.add_trace(
-                go.Bar(
-                    x=breakdown_df['Date'],
-                    y=breakdown_df['Missed Opportunity'],
-                    name='Missed Opportunity',
-                    marker_color='#FF6B6B',
-                    hovertemplate='<b>Missed</b><br>%{y:,.0f} sessions<br>%{x|%b %d, %Y}<extra></extra>'
+            st.plotly_chart(fig_sessions, use_container_width=True)
+            
+            # ===== HEATMAP 2: FULFILLMENT % =====
+            st.markdown("#### ✅ Fulfillment %")
+            st.caption("Fulfillment percentage per area and date (colors normalized per area)")
+            
+            # Normalize fulfillment per area
+            fulfillment_normalized = fulfillment_data.copy()
+            for idx in range(len(fulfillment_normalized)):
+                row = fulfillment_normalized.iloc[idx]
+                row_min = row.min()
+                row_max = row.max()
+                if row_max > row_min:
+                    fulfillment_normalized.iloc[idx] = (row - row_min) / (row_max - row_min)
+                else:
+                    fulfillment_normalized.iloc[idx] = 0
+            
+            # Build hover text and display text for fulfillment
+            hover_fulfillment = []
+            display_fulfillment = []
+            for area_idx, area in enumerate(fulfillment_data.index):
+                row_hover = []
+                row_display = []
+                for date_idx, date in enumerate(fulfillment_data.columns):
+                    sessions = sessions_data.iloc[area_idx, date_idx]
+                    rides = rides_data.iloc[area_idx, date_idx] if area in rides_data.index else 0
+                    missed = missed_data.iloc[area_idx, date_idx] if area in missed_data.index else 0
+                    fulfillment = fulfillment_data.iloc[area_idx, date_idx]
+                    
+                    active = 0
+                    urgent = 0
+                    effective = 0
+                    if area in vehicle_metrics and date in vehicle_metrics[area]['active'].index:
+                        active = vehicle_metrics[area]['active'][date]
+                        urgent = vehicle_metrics[area]['urgent'][date]
+                        effective = vehicle_metrics[area]['effective'][date]
+                    
+                    hover_text = (
+                        f"<b>{area}</b><br>"
+                        f"{date.strftime('%b %d, %Y')}<br>"
+                        f"<br>"
+                        f"<b>Demand & Performance:</b><br>"
+                        f"Sessions: {sessions:,.0f}<br>"
+                        f"Rides: {rides:,.0f}<br>"
+                        f"Missed: {missed:,.0f}<br>"
+                        f"Fulfillment: {fulfillment:.1f}%<br>"
+                        f"<br>"
+                        f"<b>Fleet Metrics:</b><br>"
+                        f"Active Scooters: {active:.0f}<br>"
+                        f"Urgent Scooters: {urgent:.0f}<br>"
+                        f"Effective Active: {effective:.0f}"
+                    )
+                    row_hover.append(hover_text)
+                    row_display.append(f"{fulfillment:.0f}%")
+                    
+                hover_fulfillment.append(row_hover)
+                display_fulfillment.append(row_display)
+            
+            fig_fulfillment = go.Figure(data=go.Heatmap(
+                z=fulfillment_normalized.values,
+                x=fulfillment_data.columns.strftime('%b %d'),
+                y=fulfillment_data.index,
+                text=display_fulfillment,  # Formatted display text
+                texttemplate='%{text}',
+                textfont=dict(size=12, family='Arial Black'),
+                hovertext=hover_fulfillment,
+                hovertemplate='%{hovertext}<extra></extra>',
+                colorscale=[
+                    [0, '#E3F2FD'],      # Very light blue (low fulfillment)
+                    [0.25, '#90CAF9'],   # Light blue
+                    [0.5, '#42A5F5'],    # Medium blue
+                    [0.75, '#1E88E5'],   # Dark blue
+                    [1, '#0D47A1']       # Very dark blue (high fulfillment)
+                ],
+                colorbar=dict(
+                    title="Relative<br>Performance",
+                    thickness=20,
+                    len=0.7,
+                    tickvals=[0, 0.5, 1],
+                    ticktext=['Low', 'Med', 'High']
                 ),
-                secondary_y=False
+                showscale=True,
+                zmin=0,
+                zmax=1
+            ))
+            
+            fig_fulfillment.update_layout(
+                height=standard_height,
+                xaxis_title="Date",
+                yaxis_title="Area",
+                xaxis=dict(tickangle=-45, side='bottom'),
+                margin=dict(l=0, r=0, t=10, b=50),
+                autosize=True
             )
             
-            # Add fulfillment % line
-            fig.add_trace(
-                go.Scatter(
-                    x=breakdown_df['Date'],
-                    y=breakdown_df['Fulfillment %'],
-                    name='Fulfillment %',
-                    mode='lines+markers',
-                    line=dict(color='#FFC107', width=3),
-                    marker=dict(size=8, color='#FFC107'),
-                    yaxis='y2',
-                    hovertemplate='<b>Fulfillment</b><br>%{y:.1f}%<br>%{x|%b %d, %Y}<extra></extra>'
+            st.plotly_chart(fig_fulfillment, use_container_width=True)
+            
+            # ===== HEATMAP 3: MISSED OPPORTUNITY =====
+            st.markdown("#### ❌ Missed Opportunity")
+            st.caption("Unfulfilled sessions per area and date (colors normalized per area)")
+            
+            # Normalize missed per area
+            missed_normalized = missed_data.copy()
+            for idx in range(len(missed_normalized)):
+                row = missed_normalized.iloc[idx]
+                row_min = row.min()
+                row_max = row.max()
+                if row_max > row_min:
+                    missed_normalized.iloc[idx] = (row - row_min) / (row_max - row_min)
+                else:
+                    missed_normalized.iloc[idx] = 0
+            
+            # Build hover text and display text for missed
+            hover_missed = []
+            display_missed = []
+            for area_idx, area in enumerate(missed_data.index):
+                row_hover = []
+                row_display = []
+                for date_idx, date in enumerate(missed_data.columns):
+                    sessions = sessions_data.iloc[area_idx, date_idx]
+                    rides = rides_data.iloc[area_idx, date_idx] if area in rides_data.index else 0
+                    missed = missed_data.iloc[area_idx, date_idx]
+                    fulfillment = fulfillment_data.iloc[area_idx, date_idx] if area in fulfillment_data.index else 0
+                    
+                    active = 0
+                    urgent = 0
+                    effective = 0
+                    if area in vehicle_metrics and date in vehicle_metrics[area]['active'].index:
+                        active = vehicle_metrics[area]['active'][date]
+                        urgent = vehicle_metrics[area]['urgent'][date]
+                        effective = vehicle_metrics[area]['effective'][date]
+                    
+                    hover_text = (
+                        f"<b>{area}</b><br>"
+                        f"{date.strftime('%b %d, %Y')}<br>"
+                        f"<br>"
+                        f"<b>Demand & Performance:</b><br>"
+                        f"Sessions: {sessions:,.0f}<br>"
+                        f"Rides: {rides:,.0f}<br>"
+                        f"Missed: {missed:,.0f}<br>"
+                        f"Fulfillment: {fulfillment:.1f}%<br>"
+                        f"<br>"
+                        f"<b>Fleet Metrics:</b><br>"
+                        f"Active Scooters: {active:.0f}<br>"
+                        f"Urgent Scooters: {urgent:.0f}<br>"
+                        f"Effective Active: {effective:.0f}"
+                    )
+                    row_hover.append(hover_text)
+                    
+                    # Format display text
+                    if missed >= 1000:
+                        display_text = f"{missed/1000:.1f}k"
+                    else:
+                        display_text = f"{missed:.0f}"
+                    row_display.append(display_text)
+                    
+                hover_missed.append(row_hover)
+                display_missed.append(row_display)
+            
+            fig_missed = go.Figure(data=go.Heatmap(
+                z=missed_normalized.values,
+                x=missed_data.columns.strftime('%b %d'),
+                y=missed_data.index,
+                text=display_missed,  # Formatted display text
+                texttemplate='%{text}',
+                textfont=dict(size=12, family='Arial Black'),
+                hovertext=hover_missed,
+                hovertemplate='%{hovertext}<extra></extra>',
+                colorscale=[
+                    [0, '#FFF3E0'],      # Very light orange (low missed)
+                    [0.25, '#FFB74D'],   # Light orange
+                    [0.5, '#FF9800'],    # Orange
+                    [0.75, '#F57C00'],   # Dark orange
+                    [1, '#E65100']       # Very dark orange/red (high missed)
+                ],
+                colorbar=dict(
+                    title="Relative<br>Missed",
+                    thickness=20,
+                    len=0.7,
+                    tickvals=[0, 0.5, 1],
+                    ticktext=['Low', 'Med', 'High']
                 ),
-                secondary_y=True
+                showscale=True,
+                zmin=0,
+                zmax=1
+            ))
+            
+            fig_missed.update_layout(
+                height=standard_height,
+                xaxis_title="Date",
+                yaxis_title="Area",
+                xaxis=dict(tickangle=-45, side='bottom'),
+                margin=dict(l=0, r=0, t=10, b=50),
+                autosize=True
             )
             
-            # Update layout
-            fig.update_layout(
-                barmode='stack',
-                hovermode='x unified',
-                height=400,
-                showlegend=True,
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                ),
-                margin=dict(l=0, r=0, t=30, b=0)
-            )
+            st.plotly_chart(fig_missed, use_container_width=True)
             
-            # Update axes
-            fig.update_xaxes(title_text="")
-            fig.update_yaxes(title_text="Sessions Count", secondary_y=False)
-            fig.update_yaxes(title_text="Fulfillment %", range=[0, 100], secondary_y=True)
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Add insight cards below chart
+            # Summary metrics for combined view
+            st.markdown("---")
             col1, col2, col3, col4 = st.columns(4)
             
-            total_sessions = breakdown_df['Total Sessions'].sum()
-            total_fulfilled = breakdown_df['Fulfilled (Rides)'].sum()
-            total_missed = breakdown_df['Missed Opportunity'].sum()
-            avg_fulfillment = breakdown_df['Fulfillment %'].mean()
+            total_sessions = sessions_data.values.sum()
+            total_rides = rides_data.values.sum()
+            total_missed = missed_data.values.sum()
+            avg_fulfillment = (total_rides / total_sessions * 100) if total_sessions > 0 else 0
             
             with col1:
-                st.metric("📊 Total Demand", f"{total_sessions:,.0f}", 
-                         help="Total sessions requested")
+                st.metric("📊 Total Sessions", f"{total_sessions:,.0f}",
+                         help="Total session requests across all areas and dates")
             with col2:
-                st.metric("✅ Fulfilled", f"{total_fulfilled:,.0f}", 
-                         delta=f"{(total_fulfilled/total_sessions*100 if total_sessions > 0 else 0):.1f}%",
-                         help="Sessions that got rides")
+                st.metric("✅ Total Rides", f"{total_rides:,.0f}",
+                         delta=f"{avg_fulfillment:.1f}% fulfillment",
+                         help="Total rides fulfilled")
             with col3:
-                st.metric("❌ Missed", f"{total_missed:,.0f}", 
-                         delta=f"-{(total_missed/total_sessions*100 if total_sessions > 0 else 0):.1f}%",
+                st.metric("❌ Total Missed", f"{total_missed:,.0f}",
+                         delta=f"-{(total_missed/total_sessions*100):.1f}%",
                          delta_color="inverse",
-                         help="Sessions without rides")
+                         help="Total unfulfilled sessions")
             with col4:
-                fulfillment_color = "normal" if avg_fulfillment >= FULFILLMENT_TARGET else "inverse"
-                st.metric("📈 Avg Fulfillment", f"{avg_fulfillment:.1f}%",
-                         delta=f"{avg_fulfillment - FULFILLMENT_TARGET:.1f}% vs target",
-                         delta_color=fulfillment_color,
-                         help=f"Target: {FULFILLMENT_TARGET}%")
+                worst_area = missed_data.sum(axis=1).idxmax()
+                worst_area_missed = missed_data.sum(axis=1).max()
+                st.metric("⚠️ Highest Impact", worst_area,
+                         help=f"Area with most missed: {worst_area_missed:,.0f}")
             
-            st.markdown("---")
+        else:
+            # ORIGINAL BAR CHART VIEW
+            # Show comprehensive chart for each area
+            for area in selected_areas:
+                if area not in sessions_aligned_bd.columns:
+                    continue
+                    
+                st.markdown(f"#### 📍 {area}")
+                
+                # Prepare data
+                breakdown_df = pd.DataFrame({
+                    'Date': sessions_aligned_bd.index,
+                    'Total Sessions': sessions_aligned_bd[area],
+                    'Fulfilled (Rides)': rides_aligned_bd[area] if area in rides_aligned_bd.columns else 0,
+                    'Missed Opportunity': missed_bd[area] if area in missed_bd.columns else 0,
+                    'Fulfillment %': fulfillment_bd[area] if area in fulfillment_bd.columns else 0
+                })
+                
+                # Calculate vehicle metrics for this area
+                area_heat = heat_filtered[heat_filtered['Area'] == area].copy()
+                area_heat['bucket'] = bucket_data(area_heat, 'timestamp', st.session_state.range_choice)
+                
+                active_by_date = area_heat.groupby('bucket')['Active Vehicles'].mean() * 1.075
+                urgent_by_date = area_heat.groupby('bucket')['Urgent Vehicles'].mean() * 1.075
+                effective_by_date = area_heat.groupby('bucket')['Effective Active Vehicles'].mean() * 1.075
+                
+                # Add vehicle metrics to breakdown_df
+                breakdown_df['Active Scooters'] = breakdown_df['Date'].map(active_by_date).fillna(0)
+                breakdown_df['Urgent Scooters'] = breakdown_df['Date'].map(urgent_by_date).fillna(0)
+                breakdown_df['Effective Active'] = breakdown_df['Date'].map(effective_by_date).fillna(0)
+                
+                # Create dual-axis chart with plotly
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                # Add stacked bars with enhanced tooltip
+                fig.add_trace(
+                    go.Bar(
+                        x=breakdown_df['Date'],
+                        y=breakdown_df['Fulfilled (Rides)'],
+                        name='Fulfilled (Rides)',
+                        marker_color='#20BF55',
+                        customdata=np.column_stack((
+                            breakdown_df['Total Sessions'],
+                            breakdown_df['Fulfilled (Rides)'],
+                            breakdown_df['Missed Opportunity'],
+                            breakdown_df['Fulfillment %'],
+                            breakdown_df['Active Scooters'],
+                            breakdown_df['Urgent Scooters'],
+                            breakdown_df['Effective Active']
+                        )),
+                        hovertemplate='<b>Fulfilled</b><br>' +
+                                      '%{x|%b %d, %Y}<br><br>' +
+                                      '<b>Demand & Performance:</b><br>' +
+                                      'Sessions: %{customdata[0]:,.0f}<br>' +
+                                      'Rides: %{customdata[1]:,.0f}<br>' +
+                                      'Missed: %{customdata[2]:,.0f}<br>' +
+                                      'Fulfillment: %{customdata[3]:.1f}%<br><br>' +
+                                      '<b>Fleet Metrics:</b><br>' +
+                                      'Active Scooters: %{customdata[4]:.0f}<br>' +
+                                      'Urgent Scooters: %{customdata[5]:.0f}<br>' +
+                                      'Effective Active: %{customdata[6]:.0f}' +
+                                      '<extra></extra>'
+                    ),
+                    secondary_y=False
+                )
+                
+                fig.add_trace(
+                    go.Bar(
+                        x=breakdown_df['Date'],
+                        y=breakdown_df['Missed Opportunity'],
+                        name='Missed Opportunity',
+                        marker_color='#FF6B6B',
+                        customdata=np.column_stack((
+                            breakdown_df['Total Sessions'],
+                            breakdown_df['Fulfilled (Rides)'],
+                            breakdown_df['Missed Opportunity'],
+                            breakdown_df['Fulfillment %'],
+                            breakdown_df['Active Scooters'],
+                            breakdown_df['Urgent Scooters'],
+                            breakdown_df['Effective Active']
+                        )),
+                        hovertemplate='<b>Missed</b><br>' +
+                                      '%{x|%b %d, %Y}<br><br>' +
+                                      '<b>Demand & Performance:</b><br>' +
+                                      'Sessions: %{customdata[0]:,.0f}<br>' +
+                                      'Rides: %{customdata[1]:,.0f}<br>' +
+                                      'Missed: %{customdata[2]:,.0f}<br>' +
+                                      'Fulfillment: %{customdata[3]:.1f}%<br><br>' +
+                                      '<b>Fleet Metrics:</b><br>' +
+                                      'Active Scooters: %{customdata[4]:.0f}<br>' +
+                                      'Urgent Scooters: %{customdata[5]:.0f}<br>' +
+                                      'Effective Active: %{customdata[6]:.0f}' +
+                                      '<extra></extra>'
+                    ),
+                    secondary_y=False
+                )
+                
+                # Add fulfillment % line with enhanced tooltip
+                fig.add_trace(
+                    go.Scatter(
+                        x=breakdown_df['Date'],
+                        y=breakdown_df['Fulfillment %'],
+                        name='Fulfillment %',
+                        mode='lines+markers',
+                        line=dict(color='#FFC107', width=3),
+                        marker=dict(size=8, color='#FFC107'),
+                        yaxis='y2',
+                        customdata=np.column_stack((
+                            breakdown_df['Total Sessions'],
+                            breakdown_df['Fulfilled (Rides)'],
+                            breakdown_df['Missed Opportunity'],
+                            breakdown_df['Fulfillment %'],
+                            breakdown_df['Active Scooters'],
+                            breakdown_df['Urgent Scooters'],
+                            breakdown_df['Effective Active']
+                        )),
+                        hovertemplate='<b>Fulfillment</b><br>' +
+                                      '%{x|%b %d, %Y}<br><br>' +
+                                      '<b>Demand & Performance:</b><br>' +
+                                      'Sessions: %{customdata[0]:,.0f}<br>' +
+                                      'Rides: %{customdata[1]:,.0f}<br>' +
+                                      'Missed: %{customdata[2]:,.0f}<br>' +
+                                      'Fulfillment: %{customdata[3]:.1f}%<br><br>' +
+                                      '<b>Fleet Metrics:</b><br>' +
+                                      'Active Scooters: %{customdata[4]:.0f}<br>' +
+                                      'Urgent Scooters: %{customdata[5]:.0f}<br>' +
+                                      'Effective Active: %{customdata[6]:.0f}' +
+                                      '<extra></extra>'
+                    ),
+                    secondary_y=True
+                )
+                
+                # Update layout
+                fig.update_layout(
+                    barmode='stack',
+                    hovermode='x unified',
+                    height=400,
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    ),
+                    margin=dict(l=0, r=0, t=30, b=0)
+                )
+                
+                # Update axes
+                fig.update_xaxes(title_text="")
+                fig.update_yaxes(title_text="Sessions Count", secondary_y=False)
+                fig.update_yaxes(title_text="Fulfillment %", range=[0, 100], secondary_y=True)
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Add insight cards below chart
+                col1, col2, col3, col4 = st.columns(4)
+                
+                total_sessions = breakdown_df['Total Sessions'].sum()
+                total_fulfilled = breakdown_df['Fulfilled (Rides)'].sum()
+                total_missed = breakdown_df['Missed Opportunity'].sum()
+                avg_fulfillment = breakdown_df['Fulfillment %'].mean()
+                
+                with col1:
+                    st.metric("📊 Total Demand", f"{total_sessions:,.0f}", 
+                             help="Total sessions requested")
+                with col2:
+                    st.metric("✅ Fulfilled", f"{total_fulfilled:,.0f}", 
+                             delta=f"{(total_fulfilled/total_sessions*100 if total_sessions > 0 else 0):.1f}%",
+                             help="Sessions that got rides")
+                with col3:
+                    st.metric("❌ Missed", f"{total_missed:,.0f}", 
+                             delta=f"-{(total_missed/total_sessions*100 if total_sessions > 0 else 0):.1f}%",
+                             delta_color="inverse",
+                             help="Sessions without rides")
+                with col4:
+                    fulfillment_color = "normal" if avg_fulfillment >= FULFILLMENT_TARGET else "inverse"
+                    st.metric("📈 Avg Fulfillment", f"{avg_fulfillment:.1f}%",
+                             delta=f"{avg_fulfillment - FULFILLMENT_TARGET:.1f}% vs target",
+                             delta_color=fulfillment_color,
+                             help=f"Target: {FULFILLMENT_TARGET}%")
+                
+                st.markdown("---")
     else:
         st.info("No data available for performance breakdown")
     
     st.markdown("")  # Spacing
     
     # Missed Opportunity Chart
-    st.markdown("### Missed Opportunity (Unfulfilled Sessions)")
+    col_title, col_toggle = st.columns([5, 1])
+    with col_title:
+        st.markdown("### Missed Opportunity (Unfulfilled Sessions)")
+    with col_toggle:
+        missed_total_view = st.toggle("Total", value=False, key="missed_total_toggle")
     
     sessions_for_missed = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
     rides_for_missed = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
@@ -1281,8 +1755,15 @@ with tab1:
     missed_opportunity_chart = missed_opportunity_chart.clip(lower=0)  # Ensure no negative values
     
     if len(missed_opportunity_chart) > 0:
-        line_chart(missed_opportunity_chart, "", "Missed Sessions", show_values=st.session_state.show_chart_values)
-        show_data_table(missed_opportunity_chart, "Missed Opportunity Data")
+        if missed_total_view:
+            # Show total (sum of all areas)
+            missed_total = missed_opportunity_chart.sum(axis=1).to_frame(name='Total')
+            line_chart(missed_total, "", "Missed Sessions", show_values=st.session_state.show_chart_values)
+            show_data_table(missed_total, "Missed Opportunity Data (Total)")
+        else:
+            # Show individual areas
+            line_chart(missed_opportunity_chart, "", "Missed Sessions", show_values=st.session_state.show_chart_values)
+            show_data_table(missed_opportunity_chart, "Missed Opportunity Data")
     else:
         st.info("No data for missed opportunity calculation")
     
@@ -1376,6 +1857,256 @@ with tab1:
             st.info("No neighborhood data")
     else:
         st.info(f"Top Neighborhoods by {top_metric.split(' by ')[-1]} - Feature coming soon")
+    
+    st.markdown("")  # Spacing
+    
+    # ========================================================================
+    # NEW ANALYTICS CHARTS
+    # ========================================================================
+    
+    st.markdown("---")
+    st.markdown("## 📈 Performance Analytics")
+    
+    # 1. VEHICLE UTILIZATION RATE
+    st.markdown("### 🚗 Vehicle Utilization Rate")
+    st.caption("Rides per vehicle per day - Shows efficiency and redeployment opportunities")
+    
+    # Calculate utilization per area
+    utilization_data = []
+    
+    for area in selected_areas:
+        area_heat = heat_filtered[heat_filtered['Area'] == area]
+        
+        if len(area_heat) > 0:
+            # Total rides
+            total_rides = area_heat['Rides'].sum()
+            
+            # Average vehicles (effective)
+            avg_vehicles = area_heat.groupby('timestamp')['Effective Active Vehicles'].mean().mean() * 1.075
+            
+            # Days in period
+            days_in_period = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1
+            
+            # Utilization = rides per vehicle per day
+            utilization = (total_rides / (avg_vehicles * days_in_period)) if avg_vehicles > 0 else 0
+            
+            utilization_data.append({
+                'Area': area,
+                'Total Rides': total_rides,
+                'Avg Vehicles': avg_vehicles,
+                'Rides per Vehicle per Day': utilization,
+                'Days': days_in_period
+            })
+    
+    if utilization_data:
+        util_df = pd.DataFrame(utilization_data)
+        
+        # Create bar chart
+        fig_util = go.Figure()
+        
+        fig_util.add_trace(go.Bar(
+            x=util_df['Area'],
+            y=util_df['Rides per Vehicle per Day'],
+            marker_color=[AREA_COLORS.get(area, "#2E86DE") for area in util_df['Area']],
+            text=util_df['Rides per Vehicle per Day'].apply(lambda x: f'{x:.1f}'),
+            textposition='outside',
+            hovertemplate='<b>%{x}</b><br>' +
+                          'Utilization: %{y:.1f} rides/vehicle/day<br>' +
+                          'Total Rides: ' + util_df['Total Rides'].apply(lambda x: f'{x:,.0f}') + '<br>' +
+                          'Avg Vehicles: ' + util_df['Avg Vehicles'].apply(lambda x: f'{x:.0f}') +
+                          '<extra></extra>'
+        ))
+        
+        # Add target line (e.g., 8 rides per vehicle per day)
+        target_utilization = 8
+        fig_util.add_hline(
+            y=target_utilization, 
+            line_dash="dash", 
+            line_color="orange",
+            annotation_text=f"Target: {target_utilization} rides/vehicle/day",
+            annotation_position="right"
+        )
+        
+        fig_util.update_layout(
+            yaxis_title="Rides per Vehicle per Day",
+            xaxis_title="",
+            height=400,
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig_util, use_container_width=True)
+        
+        # Add metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        avg_util = util_df['Rides per Vehicle per Day'].mean()
+        total_vehicles = util_df['Avg Vehicles'].sum()
+        underutilized = len(util_df[util_df['Rides per Vehicle per Day'] < target_utilization])
+        best_area = util_df.loc[util_df['Rides per Vehicle per Day'].idxmax(), 'Area']
+        
+        with col1:
+            st.metric("📊 Avg Utilization", f"{avg_util:.1f} rides/veh/day")
+        with col2:
+            st.metric("🚗 Total Vehicles", f"{total_vehicles:.0f}")
+        with col3:
+            st.metric("⚠️ Below Target", f"{underutilized} areas",
+                     delta_color="inverse" if underutilized > 0 else "normal")
+        with col4:
+            st.metric("🏆 Best Performance", best_area)
+        
+        st.info(f"💡 **Insight:** Areas below {target_utilization} rides/vehicle/day may have excess capacity. Consider redeploying vehicles to high-demand areas.")
+    else:
+        st.info("No vehicle data available")
+    
+    st.markdown("")  # Spacing
+    
+    # 2. PEAK VS OFF-PEAK COMPARISON
+    st.markdown("### ⚡ Peak vs Off-Peak Performance")
+    st.caption("Compare rides and vehicle availability during peak hours vs off-peak")
+    
+    # Define peak hours (7-10 AM and 5-9 PM)
+    def is_peak_hour(hour):
+        return (7 <= hour <= 10) or (17 <= hour <= 21)
+    
+    # Calculate peak vs off-peak metrics from heat data (has timestamps with hours)
+    peak_data = []
+    
+    for area in selected_areas:
+        area_heat = heat_filtered[heat_filtered['Area'] == area].copy()
+        
+        if len(area_heat) > 0:
+            # Add hour column from timestamp
+            area_heat['hour'] = area_heat['timestamp'].dt.hour
+            
+            # Split into peak and off-peak
+            peak_heat = area_heat[area_heat['hour'].apply(is_peak_hour)]
+            offpeak_heat = area_heat[~area_heat['hour'].apply(is_peak_hour)]
+            
+            # Calculate metrics
+            peak_rides = peak_heat['Rides'].sum()
+            offpeak_rides = offpeak_heat['Rides'].sum()
+            
+            # Average vehicles during each period
+            peak_vehicles = peak_heat.groupby('timestamp')['Effective Active Vehicles'].mean().mean() * 1.075 if len(peak_heat) > 0 else 0
+            offpeak_vehicles = offpeak_heat.groupby('timestamp')['Effective Active Vehicles'].mean().mean() * 1.075 if len(offpeak_heat) > 0 else 0
+            
+            # Rides per vehicle (efficiency)
+            peak_efficiency = (peak_rides / peak_vehicles) if peak_vehicles > 0 else 0
+            offpeak_efficiency = (offpeak_rides / offpeak_vehicles) if offpeak_vehicles > 0 else 0
+            
+            # Calculate what fulfillment would be (rides / rides is 100%, but we show utilization)
+            # Using rides per vehicle as a proxy for demand pressure
+            peak_data.append({
+                'Area': area,
+                'Peak Rides': peak_rides,
+                'Peak Vehicles': peak_vehicles,
+                'Peak Efficiency': peak_efficiency,
+                'Off-Peak Rides': offpeak_rides,
+                'Off-Peak Vehicles': offpeak_vehicles,
+                'Off-Peak Efficiency': offpeak_efficiency,
+                'Efficiency Gap': peak_efficiency - offpeak_efficiency
+            })
+    
+    if peak_data:
+        peak_df = pd.DataFrame(peak_data)
+        
+        # Create grouped bar chart for rides per vehicle (efficiency)
+        fig_peak = go.Figure()
+        
+        # Calculate total rides for percentage
+        peak_df['Peak %'] = (peak_df['Peak Rides'] / (peak_df['Peak Rides'] + peak_df['Off-Peak Rides']) * 100)
+        peak_df['Off-Peak %'] = (peak_df['Off-Peak Rides'] / (peak_df['Peak Rides'] + peak_df['Off-Peak Rides']) * 100)
+        
+        fig_peak.add_trace(go.Bar(
+            name='Peak Hours (7-10 AM, 5-9 PM)',
+            x=peak_df['Area'],
+            y=peak_df['Peak Efficiency'],
+            marker_color='#FF6B6B',
+            text=peak_df['Peak Efficiency'].apply(lambda x: f'{x:.1f}'),
+            textposition='outside',
+            customdata=np.column_stack((
+                peak_df['Peak Rides'],
+                peak_df['Peak %']
+            )),
+            hovertemplate='<b>%{x} - Peak Hours</b><br>' +
+                          'Rides/Vehicle: %{y:.1f}<br>' +
+                          'Total Rides: %{customdata[0]:,.0f}<br>' +
+                          '% of Daily Rides: %{customdata[1]:.1f}%' +
+                          '<extra></extra>'
+        ))
+        
+        fig_peak.add_trace(go.Bar(
+            name='Off-Peak Hours',
+            x=peak_df['Area'],
+            y=peak_df['Off-Peak Efficiency'],
+            marker_color='#20BF55',
+            text=peak_df['Off-Peak Efficiency'].apply(lambda x: f'{x:.1f}'),
+            textposition='outside',
+            customdata=np.column_stack((
+                peak_df['Off-Peak Rides'],
+                peak_df['Off-Peak %']
+            )),
+            hovertemplate='<b>%{x} - Off-Peak Hours</b><br>' +
+                          'Rides/Vehicle: %{y:.1f}<br>' +
+                          'Total Rides: %{customdata[0]:,.0f}<br>' +
+                          '% of Daily Rides: %{customdata[1]:.1f}%' +
+                          '<extra></extra>'
+        ))
+        
+        # Add target line (e.g., 3 rides per vehicle during that period)
+        target_efficiency = 3
+        fig_peak.add_hline(
+            y=target_efficiency,
+            line_dash="dash",
+            line_color="gray",
+            annotation_text=f"Target: {target_efficiency} rides/vehicle",
+            annotation_position="right"
+        )
+        
+        fig_peak.update_layout(
+            barmode='group',
+            yaxis_title="Rides per Vehicle",
+            xaxis_title="",
+            height=400,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
+        st.plotly_chart(fig_peak, use_container_width=True)
+        
+        # Add insights
+        col1, col2, col3 = st.columns(3)
+        
+        avg_peak_eff = peak_df['Peak Efficiency'].mean()
+        avg_offpeak_eff = peak_df['Off-Peak Efficiency'].mean()
+        avg_gap = peak_df['Efficiency Gap'].mean()
+        
+        total_peak_rides = peak_df['Peak Rides'].sum()
+        total_offpeak_rides = peak_df['Off-Peak Rides'].sum()
+        avg_peak_vehicles = peak_df['Peak Vehicles'].mean()
+        avg_offpeak_vehicles = peak_df['Off-Peak Vehicles'].mean()
+        
+        with col1:
+            st.metric("⚡ Peak Rides/Vehicle", f"{avg_peak_eff:.1f}",
+                     help=f"Average: {avg_peak_vehicles:.0f} vehicles serving {total_peak_rides:,.0f} rides during 7-10 AM, 5-9 PM")
+        with col2:
+            st.metric("💤 Off-Peak Rides/Vehicle", f"{avg_offpeak_eff:.1f}",
+                     help=f"Average: {avg_offpeak_vehicles:.0f} vehicles serving {total_offpeak_rides:,.0f} rides during other hours")
+        with col3:
+            delta_text = f"{'Higher' if avg_gap > 0 else 'Lower'} during peak"
+            st.metric("📊 Efficiency Difference", f"{abs(avg_gap):.1f}",
+                     delta=delta_text,
+                     delta_color="inverse" if avg_gap < 0 else "normal",
+                     help="Difference in rides per vehicle between peak and off-peak")
+        
+        # Insights
+        if avg_gap > 1.5:
+            st.success(f"✅ **Insight:** Vehicles are {avg_gap:.1f} rides/vehicle MORE efficient during peak hours ({avg_peak_eff:.1f} vs {avg_offpeak_eff:.1f}). This is good! Peak demand is being handled well, though you may still have capacity for more rides.")
+        elif avg_gap < -1.5:
+            st.warning(f"⚠️ **Insight:** Vehicles are {abs(avg_gap):.1f} rides/vehicle LESS efficient during peak hours ({avg_peak_eff:.1f} vs {avg_offpeak_eff:.1f}). This suggests vehicles may be idle during peaks or demand is in different locations than vehicles. Review vehicle positioning during 7-10 AM and 5-9 PM.")
+        else:
+            st.info(f"💡 **Insight:** Similar efficiency during peak ({avg_peak_eff:.1f}) and off-peak ({avg_offpeak_eff:.1f}) hours. Demand pressure is consistent throughout the day.")
+    else:
+        st.info("No data available for peak comparison")
 
 with tab2:
     st.markdown("### 🏘️ Neighborhood View")
