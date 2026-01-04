@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 import pickle
 from datetime import datetime, timedelta
 import gc
+import time
 
 st.set_page_config(page_title="Supply & Demand Dashboard", layout="wide", page_icon="📊")
 
@@ -760,6 +761,150 @@ if st.session_state.data_loaded:
             if ANALYZED_DATA_FILE.exists():
                 ANALYZED_DATA_FILE.unlink()
             st.rerun()
+    
+    # ADD MORE DATA SECTION (when data is already loaded)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**➕ Add More Data**")
+    st.sidebar.caption("📅 Append new dates to existing data")
+    
+    with st.sidebar.expander("📊 Upload Additional Files", expanded=False):
+        st.info("💡 Upload files with NEW dates to add to your existing dataset")
+        
+        append_sfiles = st.file_uploader(
+            "Sessions (new dates)", 
+            type=["csv", "xlsx"], 
+            accept_multiple_files=True, 
+            key="append_sessions_upload"
+        )
+        append_hfiles = st.file_uploader(
+            "Heat Data (new dates)", 
+            type=["csv", "xlsx"], 
+            accept_multiple_files=True, 
+            key="append_heat_upload"
+        )
+        
+        if st.button("➕ Append & Merge", type="primary", use_container_width=True):
+            if not (append_sfiles and append_hfiles):
+                st.error("Upload files for both Sessions and Heat Data")
+            elif not st.session_state.distribution_points:
+                st.error("Add distribution points first")
+            else:
+                # Set append mode flag
+                append_mode = True
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Load existing data
+                status_text.text("📂 Loading existing data...")
+                existing_sessions = st.session_state.sessions_agg
+                existing_heat = st.session_state.heat
+                
+                st.info(f"✅ Found existing data: {len(existing_sessions):,} session records")
+                
+                try:
+                    # Process new Sessions files
+                    status_text.text("📊 Processing new sessions files...")
+                    sessions_agg_list = []
+                    
+                    for i, sfile in enumerate(append_sfiles):
+                        progress = (i / (len(append_sfiles) + len(append_hfiles)))
+                        progress_bar.progress(progress)
+                        status_text.text(f"📊 Processing session file {i+1}/{len(append_sfiles)}: {sfile.name}")
+                        
+                        if sfile.name.endswith('.csv'):
+                            sessions = pd.read_csv(sfile)
+                        else:
+                            sessions = pd.read_excel(sfile)
+                        
+                        if 'Session_Date' in sessions.columns:
+                            sessions['timestamp'] = pd.to_datetime(sessions['Session_Date'], errors='coerce')
+                        elif 'Created At (Local)' in sessions.columns:
+                            sessions['timestamp'] = pd.to_datetime(sessions['Created At (Local)'], errors='coerce')
+                        else:
+                            for col in sessions.columns:
+                                if 'date' in col.lower():
+                                    sessions['timestamp'] = pd.to_datetime(sessions[col], errors='coerce')
+                                    break
+                        
+                        sessions = sessions[sessions['timestamp'].notna()].copy()
+                        sessions = assign_sessions_to_areas(sessions, st.session_state.distribution_points)
+                        agg = aggregate_sessions(sessions)
+                        sessions_agg_list.append(agg)
+                        
+                        del sessions
+                        gc.collect()
+                    
+                    new_sessions_agg = pd.concat(sessions_agg_list, ignore_index=True)
+                    new_sessions_agg = new_sessions_agg.groupby(['Area', 'Neighborhood', 'date']).sum().reset_index()
+                    
+                    # Merge with existing
+                    status_text.text("🔗 Merging with existing session data...")
+                    combined_sessions = pd.concat([existing_sessions, new_sessions_agg], ignore_index=True)
+                    sessions_agg = combined_sessions.groupby(['Area', 'Neighborhood', 'date']).sum().reset_index()
+                    status_text.text(f"✅ Merged: {sessions_agg['sessions_count'].sum():,} total sessions")
+                    
+                    del sessions_agg_list, new_sessions_agg, combined_sessions
+                    gc.collect()
+                    
+                    # Process new Heat files
+                    status_text.text("🔥 Processing new heat files...")
+                    heat_list = []
+                    
+                    for i, hfile in enumerate(append_hfiles):
+                        progress = ((len(append_sfiles) + i) / (len(append_sfiles) + len(append_hfiles)))
+                        progress_bar.progress(progress)
+                        status_text.text(f"🔥 Loading heat file {i+1}/{len(append_hfiles)}: {hfile.name}")
+                        
+                        if hfile.name.endswith('.csv'):
+                            heat = pd.read_csv(hfile)
+                        else:
+                            heat = pd.read_excel(hfile)
+                        
+                        heat_list.append(heat)
+                    
+                    new_heat = pd.concat(heat_list, ignore_index=True)
+                    
+                    if 'Start Date - Local' in new_heat.columns:
+                        new_heat['timestamp'] = pd.to_datetime(new_heat['Start Date - Local'], errors='coerce')
+                    else:
+                        new_heat['timestamp'] = pd.to_datetime(new_heat['Start Date'], errors='coerce')
+                    
+                    new_heat = new_heat[new_heat['timestamp'].notna()].copy()
+                    new_heat['Area'] = new_heat['Area'].astype('category')
+                    
+                    # Merge with existing
+                    status_text.text("🔗 Merging with existing heat data...")
+                    combined_heat = pd.concat([existing_heat, new_heat], ignore_index=True)
+                    heat = combined_heat.drop_duplicates(subset=['timestamp', 'Area', 'Neighborhood Name'], keep='last')
+                    status_text.text(f"✅ Merged: {len(heat):,} total heat records")
+                    
+                    del heat_list, new_heat, combined_heat
+                    gc.collect()
+                    
+                    # Save merged data
+                    progress_bar.progress(0.95)
+                    status_text.text("💾 Saving merged data...")
+                    
+                    rides = pd.DataFrame()
+                    save_analyzed_data(sessions_agg, heat, rides)
+                    
+                    st.session_state.sessions_agg = sessions_agg
+                    st.session_state.heat = heat
+                    st.session_state.rides = rides
+                    st.session_state.data_updated = datetime.now()
+                    
+                    progress_bar.progress(1.0)
+                    status_text.text("✅ Merge complete!")
+                    st.success("🎉 Data successfully appended! Don't forget to export the combined data.")
+                    
+                    time.sleep(2)
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Append failed: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
 
 if not st.session_state.data_loaded:
     # Check if there's an existing analyzed data file
@@ -821,8 +966,18 @@ if not st.session_state.data_loaded:
                 st.sidebar.error(f"❌ Import failed: {str(e)}")
     
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**📊 Or Upload New Files:**")
+    st.sidebar.markdown("**📊 Upload New Files:**")
     st.sidebar.caption("💡 You can upload multiple files - they will be combined automatically")
+    
+    # Append mode option
+    append_mode = st.sidebar.checkbox(
+        "➕ Append to existing data",
+        value=False,
+        help="Add new dates to your existing data instead of replacing it. Great for adding Jan 11-20 to existing Jan 1-10 data!"
+    )
+    
+    if append_mode:
+        st.sidebar.info("📌 Append Mode: New data will be added to existing data")
     
     sfiles = st.sidebar.file_uploader("Sessions", type=["csv", "xlsx"], accept_multiple_files=True, key="sessions_upload")
     hfiles = st.sidebar.file_uploader("Heat Data", type=["csv", "xlsx"], accept_multiple_files=True, key="heat_upload")
@@ -835,6 +990,21 @@ if not st.session_state.data_loaded:
         else:
             progress_bar = st.progress(0)
             status_text = st.empty()
+            
+            # Load existing data if in append mode
+            existing_sessions = None
+            existing_heat = None
+            
+            if append_mode:
+                status_text.text("📂 Loading existing data...")
+                loaded_data = load_analyzed_data()
+                if loaded_data and 'sessions_agg' in loaded_data and 'heat' in loaded_data:
+                    existing_sessions = loaded_data['sessions_agg']
+                    existing_heat = loaded_data['heat']
+                    st.sidebar.info(f"✅ Found existing data: {len(existing_sessions):,} session records")
+                else:
+                    st.sidebar.warning("⚠️ No existing data found. Will process as new data.")
+                    append_mode = False  # Turn off append mode if no existing data
             
             try:
                 # Process Sessions
@@ -898,6 +1068,15 @@ if not st.session_state.data_loaded:
                 # Group by Area, Neighborhood, AND date to preserve neighborhood-level data
                 sessions_agg = sessions_agg.groupby(['Area', 'Neighborhood', 'date']).sum().reset_index()
                 
+                # Merge with existing data if in append mode
+                if append_mode and existing_sessions is not None:
+                    status_text.text("🔗 Merging with existing session data...")
+                    # Combine new and existing data
+                    combined_sessions = pd.concat([existing_sessions, sessions_agg], ignore_index=True)
+                    # Remove duplicates (keep latest), group by Area, Neighborhood, date
+                    sessions_agg = combined_sessions.groupby(['Area', 'Neighborhood', 'date']).sum().reset_index()
+                    status_text.text(f"✅ Merged: {sessions_agg['sessions_count'].sum():,} total sessions")
+                
                 status_text.text(f"✅ Total: {sessions_agg['sessions_count'].sum():,} sessions")
                 
                 del sessions_agg_list
@@ -930,6 +1109,15 @@ if not st.session_state.data_loaded:
                 
                 heat = heat[heat['timestamp'].notna()].copy()
                 heat['Area'] = heat['Area'].astype('category')
+                
+                # Merge with existing data if in append mode
+                if append_mode and existing_heat is not None:
+                    status_text.text("🔗 Merging with existing heat data...")
+                    # Combine new and existing heat data
+                    combined_heat = pd.concat([existing_heat, heat], ignore_index=True)
+                    # Remove exact duplicates based on timestamp and other key columns
+                    heat = combined_heat.drop_duplicates(subset=['timestamp', 'Area', 'Neighborhood Name'], keep='last')
+                    status_text.text(f"✅ Merged: {len(heat):,} total heat records")
                 
                 status_text.text(f"✅ Total heatdata: {len(heat):,} rows")
                 
