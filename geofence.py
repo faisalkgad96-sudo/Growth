@@ -920,12 +920,30 @@ with st.expander("🔍 **Filters & Settings**", expanded=True):
             st.error("⚠️ No valid dates found")
             st.stop()
         
-        start_date, end_date = st.date_input(
+        # Convert to date objects
+        min_date = date_min.date()
+        max_date = date_max.date()
+        
+        # Calculate default start date (20 days back, but not before min_date)
+        default_start = max_date - timedelta(days=20)
+        if default_start < min_date:
+            default_start = min_date
+        
+        # Use date_input with proper default values
+        date_range = st.date_input(
             "**Date Range**",
-            value=(date_max.date() - timedelta(days=20), date_max.date()),
-            min_value=date_min.date(),
-            max_value=date_max.date(),
+            value=(default_start, max_date),
+            min_value=min_date,
+            max_value=max_date,
         )
+        
+        # Handle both tuple and single date returns
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+        elif isinstance(date_range, tuple) and len(date_range) == 1:
+            start_date = end_date = date_range[0]
+        else:
+            start_date = end_date = date_range
     
     with col3:
         st.session_state.range_choice = st.selectbox(
@@ -1104,7 +1122,7 @@ with tab1:
     with col_title:
         st.markdown("### Sessions Over Time")
     with col_toggle:
-        sessions_total_view = st.toggle("Total", value=False, key="sessions_total_toggle")
+        sessions_total_view = st.checkbox("Total", value=False, key="sessions_total_toggle")
     
     sessions_filtered['bucket'] = bucket_data(sessions_filtered, 'date', st.session_state.range_choice)
     sessions_chart = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
@@ -1129,7 +1147,7 @@ with tab1:
     with col_title:
         st.markdown("### Rides Over Time")
     with col_toggle:
-        rides_total_view = st.toggle("Total", value=False, key="rides_total_toggle")
+        rides_total_view = st.checkbox("Total", value=False, key="rides_total_toggle")
     
     heat_filtered['bucket'] = bucket_data(heat_filtered, 'timestamp', st.session_state.range_choice)
     rides_chart = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
@@ -1154,7 +1172,7 @@ with tab1:
     with col_title:
         st.markdown("### Fulfillment % Over Time")
     with col_toggle:
-        fulfillment_total_view = st.toggle("Total", value=False, key="fulfillment_total_toggle")
+        fulfillment_total_view = st.checkbox("Total", value=False, key="fulfillment_total_toggle")
     
     sessions_for_fulfill = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
     rides_for_fulfill = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
@@ -1181,11 +1199,9 @@ with tab1:
     st.markdown("")  # Spacing
     
     # Comprehensive Sessions Breakdown Chart with toggle
-    col_title, col_toggle = st.columns([5, 1])
-    with col_title:
-        st.markdown("### 📊 Sessions Performance: Demand, Fulfillment & Missed Opportunity")
-    with col_toggle:
-        view_mode = st.toggle("🔥 Heatmap", value=False, key="performance_heatmap_toggle")
+    st.markdown("### 📊 Sessions Performance: Demand, Fulfillment & Missed Opportunity")
+    
+    view_mode = st.checkbox("🔥 Heatmap View", value=False, key="performance_heatmap_toggle", help="Toggle between bar charts and heatmap visualization")
     
     # Calculate data for the breakdown
     sessions_breakdown = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
@@ -1745,7 +1761,7 @@ with tab1:
     with col_title:
         st.markdown("### Missed Opportunity (Unfulfilled Sessions)")
     with col_toggle:
-        missed_total_view = st.toggle("Total", value=False, key="missed_total_toggle")
+        missed_total_view = st.checkbox("Total", value=False, key="missed_total_toggle")
     
     sessions_for_missed = sessions_filtered.groupby(['bucket', 'Area'])['sessions_count'].sum().unstack().fillna(0)
     rides_for_missed = heat_filtered.groupby(['bucket', 'Area'])['Rides'].sum().unstack().fillna(0)
