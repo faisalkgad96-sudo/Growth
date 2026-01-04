@@ -73,10 +73,20 @@ def save_analyzed_data(sessions_agg, heat, rides):
         pickle.dump(data, f)
 
 def load_analyzed_data():
-    """Load analyzed data from disk"""
+    """Load analyzed data from disk - returns dict or None"""
     if ANALYZED_DATA_FILE.exists():
         with open(ANALYZED_DATA_FILE, 'rb') as f:
-            return pickle.load(f)
+            data = pickle.load(f)
+            # Ensure it's a dictionary
+            if isinstance(data, dict):
+                return data
+            else:
+                # Old format - convert to dict
+                return {
+                    'sessions_agg': data[0] if len(data) > 0 else None,
+                    'heat': data[1] if len(data) > 1 else None,
+                    'timestamp': datetime.now()
+                }
     return None
 
 # ============================================================================
@@ -718,6 +728,26 @@ if st.session_state.data_loaded:
     if hasattr(st.session_state, 'data_updated'):
         st.sidebar.caption(f"Updated: {st.session_state.data_updated.strftime('%Y-%m-%d %H:%M')}")
     
+    # Export Data Option
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**💾 Save Your Work**")
+    st.sidebar.caption("⏱️ Quick restore after app sleep!")
+    
+    if ANALYZED_DATA_FILE.exists():
+        # Get file size
+        file_size_mb = ANALYZED_DATA_FILE.stat().st_size / (1024 * 1024)
+        
+        with open(ANALYZED_DATA_FILE, 'rb') as f:
+            st.sidebar.download_button(
+                label=f"📥 Export Data ({file_size_mb:.1f} MB)",
+                data=f.read(),
+                file_name=f"dashboard_data_{datetime.now().strftime('%Y%m%d')}.pkl",
+                mime="application/octet-stream",
+                use_container_width=True,
+                help="Download processed data. Upload this file to quickly restore your dashboard after app sleep!"
+            )
+    
+    st.sidebar.markdown("---")
     col1, col2 = st.sidebar.columns(2)
     with col1:
         if st.button("🔄 Re-analyze", use_container_width=True):
@@ -732,7 +762,66 @@ if st.session_state.data_loaded:
             st.rerun()
 
 if not st.session_state.data_loaded:
-    st.sidebar.markdown("**Upload Files:**")
+    # Check if there's an existing analyzed data file
+    if ANALYZED_DATA_FILE.exists():
+        st.sidebar.info("💡 Previous data found!")
+        if st.sidebar.button("⚡ Load Previous Data", use_container_width=True, type="primary"):
+            try:
+                loaded_data = load_analyzed_data()
+                if loaded_data and 'sessions_agg' in loaded_data and 'heat' in loaded_data:
+                    st.session_state.sessions_agg = loaded_data['sessions_agg']
+                    st.session_state.heat = loaded_data['heat']
+                    st.session_state.data_loaded = True
+                    if 'timestamp' in loaded_data:
+                        st.session_state.data_updated = loaded_data['timestamp']
+                    else:
+                        st.session_state.data_updated = datetime.now()
+                    st.sidebar.success("✅ Previous data loaded!")
+                    st.rerun()
+                else:
+                    st.sidebar.error("❌ Invalid data format")
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to load: {str(e)}")
+        
+        st.sidebar.markdown("---")
+    
+    # Import Previously Exported Data
+    st.sidebar.markdown("**📤 Quick Restore**")
+    st.sidebar.caption("Upload previously exported data")
+    
+    import_file = st.sidebar.file_uploader(
+        "Import Saved Data",
+        type=["pkl"],
+        key="import_data",
+        help="Upload a .pkl file you previously exported to quickly restore your dashboard"
+    )
+    
+    if import_file is not None:
+        if st.sidebar.button("⚡ Import & Load", use_container_width=True, type="primary"):
+            try:
+                # Save the uploaded file
+                with open(ANALYZED_DATA_FILE, 'wb') as f:
+                    f.write(import_file.read())
+                
+                # Load it
+                loaded_data = load_analyzed_data()
+                if loaded_data and 'sessions_agg' in loaded_data and 'heat' in loaded_data:
+                    st.session_state.sessions_agg = loaded_data['sessions_agg']
+                    st.session_state.heat = loaded_data['heat']
+                    st.session_state.data_loaded = True
+                    if 'timestamp' in loaded_data:
+                        st.session_state.data_updated = loaded_data['timestamp']
+                    else:
+                        st.session_state.data_updated = datetime.now()
+                    st.sidebar.success("✅ Data imported successfully!")
+                    st.rerun()
+                else:
+                    st.sidebar.error("❌ Invalid data file format")
+            except Exception as e:
+                st.sidebar.error(f"❌ Import failed: {str(e)}")
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**📊 Or Upload New Files:**")
     st.sidebar.caption("💡 You can upload multiple files - they will be combined automatically")
     
     sfiles = st.sidebar.file_uploader("Sessions", type=["csv", "xlsx"], accept_multiple_files=True, key="sessions_upload")
